@@ -3,7 +3,8 @@
  * Three.js + GSAP.  All modules are local ESM (no CDN / <script> tags).
  *
  * Pipeline:  audio input (mic | file) -> AnalyserNode -> band split (Hz-derived)
- *            -> GSAP-smoothed vectors -> particle vortex + logo + camera
+ *            -> GSAP-smoothed vectors -> style director (16 formations, morphs
+ *            on song/beat changes) -> particle engine + logo stack + camera
  *            -> EffectComposer (afterimage trails + neon bloom).
  * ==========================================================================*/
 
@@ -14,6 +15,7 @@ import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { gsap } from 'gsap';
+import { FORMATIONS } from './formations.js';
 
 /* ---------------------------------------------------------------------------
  * 0. Theme constants (mirrors styles.css)
@@ -24,7 +26,18 @@ const ACCENT_B = new THREE.Color('#66ff33'); // electric neon green
 const WHITE = new THREE.Color('#ffffff');
 
 const PARTICLE_COUNT = 40000;
-const LOGO_URL = '/resource/logo.png'; // pulled from Vite public/ at build time
+const LOGO_PINK_URL = '/resource/logo.png';
+const LOGO_GREEN_URL = '/resource/logo-green.png';
+const WORD_URLS = [
+  '/resource/words/reboot.png',
+  '/resource/words/reunite.png',
+  '/resource/words/restart.png',
+  '/resource/words/volution.png',
+  '/resource/words/reintroduce.png',
+  '/resource/words/redo.png',
+  '/resource/words/unite.png',
+  '/resource/words/cycle.png',
+];
 
 /* ---------------------------------------------------------------------------
  * 1. Renderer / scene / camera
@@ -53,13 +66,12 @@ const camera = new THREE.PerspectiveCamera(
 camera.position.set(0, 0, 46);
 camera.lookAt(0, 0, 0);
 
-/* Root group we spin as the "vortex" host. */
+/* Root group we spin slowly for extra depth. */
 const world = new THREE.Group();
 scene.add(world);
 
 /* ---------------------------------------------------------------------------
  * 2. Post-processing — motion-blur trails + neon bloom
- *    RenderPass -> AfterimagePass (feedback trails) -> Bloom -> OutputPass
  * ------------------------------------------------------------------------- */
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
@@ -82,14 +94,14 @@ composer.addPass(new OutputPass());
 /* ---------------------------------------------------------------------------
  * 3. Canvas-generated textures (zero external image deps)
  * ------------------------------------------------------------------------- */
-function makeRadialSprite(inner = 'rgba(255,255,255,1)', outer = 'rgba(255,255,255,0)') {
+function makeRadialSprite(inner = 'rgba(255,255,255,1)', outer = 'rgba(255,255,255,0)', mid = 0.25) {
   const size = 128;
   const cv = document.createElement('canvas');
   cv.width = cv.height = size;
   const ctx = cv.getContext('2d');
   const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
   g.addColorStop(0.0, inner);
-  g.addColorStop(0.25, inner);
+  g.addColorStop(mid, inner);
   g.addColorStop(1.0, outer);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
@@ -100,57 +112,73 @@ function makeRadialSprite(inner = 'rgba(255,255,255,1)', outer = 'rgba(255,255,2
 
 const particleSprite = makeRadialSprite();
 const glowSprite = makeRadialSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)');
+// Dark contrast disc — the "do not blend the logo away" guarantee.
+const haloSprite = makeRadialSprite('rgba(10,5,27,0.96)', 'rgba(10,5,27,0)', 0.42);
+
+/**
+ * Load word art and convert "ink on white" to a white, tintable alpha mask:
+ * dark pixels -> opaque white, white/transparent pixels -> transparent.
+ * Works whether the source PNG has a transparent or opaque background.
+ */
+function loadInkTexture(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement('canvas');
+      cv.width = img.width; cv.height = img.height;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, cv.width, cv.height);
+      const px = data.data;
+      for (let p = 0; p < px.length; p += 4) {
+        const lum = (px[p] * 0.299 + px[p + 1] * 0.587 + px[p + 2] * 0.114) / 255;
+        const ink = (1 - lum) * (px[p + 3] / 255);
+        px[p] = px[p + 1] = px[p + 2] = 255;
+        px[p + 3] = Math.round(ink * 255);
+      }
+      ctx.putImageData(data, 0, 0);
+      const tex = new THREE.CanvasTexture(cv);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.userData.aspect = img.width / img.height;
+      resolve(tex);
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
 
 /* ---------------------------------------------------------------------------
- * 4. Particle vortex — BufferGeometry + PointsMaterial (spiral galaxy)
- *    Each particle keeps cylindrical "base" coords; per frame we swirl the
- *    angle (bass-driven) and add a layered-sine turbulence field (mids-driven).
- *    This turbulence is allocation-free -> a solid 60fps at 40k points.
+ * 4. Particle engine — one shared 40k buffer, morphable between formations
  * ------------------------------------------------------------------------- */
-const ARMS = 5;
-const GALAXY_RADIUS = 30;
+const N = PARTICLE_COUNT;
+const positions = new Float32Array(N * 3);
+const colors = new Float32Array(N * 3);
 
-const positions = new Float32Array(PARTICLE_COUNT * 3);
-const colors = new Float32Array(PARTICLE_COUNT * 3);
+// Stable per-particle randomness (formations regenerate deterministically).
+const rnd1 = new Float32Array(N);
+const rnd2 = new Float32Array(N);
+const rnd3 = new Float32Array(N);
+for (let i = 0; i < N; i++) { rnd1[i] = Math.random(); rnd2[i] = Math.random(); rnd3[i] = Math.random(); }
 
-// Per-particle base state (kept out of the render buffer, no per-frame allocs).
-const baseRadius = new Float32Array(PARTICLE_COUNT);
-const baseAngle = new Float32Array(PARTICLE_COUNT);
-const baseY = new Float32Array(PARTICLE_COUNT);
-const spinSeed = new Float32Array(PARTICLE_COUNT); // inner particles spin faster
-const turbPhase = new Float32Array(PARTICLE_COUNT);
-const turbFreq = new Float32Array(PARTICLE_COUNT);
-const hueT = new Float32Array(PARTICLE_COUNT); // 0=crimson .. 1=green (static gradient)
+// Motion caches for the ACTIVE formation (cylindrical around its spin axis).
+const basePos = new Float32Array(N * 3);
+const baseRadius = new Float32Array(N);
+const baseAngle = new Float32Array(N);
+const baseAxis = new Float32Array(N);
+const spinMul = new Float32Array(N);
+const turbPhase = new Float32Array(N);
+const turbFreq = new Float32Array(N);
+const auxA = new Float32Array(N);
 
-const _c = new THREE.Color();
-for (let i = 0; i < PARTICLE_COUNT; i++) {
-  // Radius biased toward the centre for a dense core, sparse outer sweep.
-  const r = Math.pow(Math.random(), 0.65) * GALAXY_RADIUS;
-  const arm = (i % ARMS) / ARMS * Math.PI * 2;
-  const spin = r * 0.16;                       // spiral tightening with radius
-  const scatter = (Math.random() - 0.5) * 0.55 * (1 + r * 0.04);
-  const angle = arm + spin + scatter;
-
-  baseRadius[i] = r;
-  baseAngle[i] = angle;
-  baseY[i] = (Math.random() - 0.5) * (2.5 + r * 0.18); // disc thickens outward
-  spinSeed[i] = 0.4 + Math.random() * 0.6;
-  turbPhase[i] = Math.random() * Math.PI * 2;
-  turbFreq[i] = 0.6 + Math.random() * 1.4;
-
-  const i3 = i * 3;
-  positions[i3] = Math.cos(angle) * r;
-  positions[i3 + 1] = baseY[i];
-  positions[i3 + 2] = Math.sin(angle) * r;
-
-  // Static radial gradient crimson (core) -> green (rim), with slight noise.
-  const t = THREE.MathUtils.clamp(r / GALAXY_RADIUS + (Math.random() - 0.5) * 0.15, 0, 1);
-  hueT[i] = t;
-  _c.copy(ACCENT_A).lerp(ACCENT_B, t);
-  colors[i3] = _c.r;
-  colors[i3 + 1] = _c.g;
-  colors[i3 + 2] = _c.b;
-}
+// Morph scratch: where we're coming from / going to.
+const fromPos = new Float32Array(N * 3);
+const fromCol = new Float32Array(N * 3);
+const targetPos = new Float32Array(N * 3);
+const targetCol = new Float32Array(N * 3);
+const pendSpin = new Float32Array(N);
+const pendPhase = new Float32Array(N);
+const pendFreq = new Float32Array(N);
+const pendAux = new Float32Array(N);
 
 const particleGeo = new THREE.BufferGeometry();
 particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -168,73 +196,192 @@ const particleMat = new THREE.PointsMaterial({
 });
 
 const particles = new THREE.Points(particleGeo, particleMat);
-// Base tilt so the spiral is seen at a dramatic 3/4 angle (not edge-on).
-particles.rotation.x = -0.62;
 world.add(particles);
 
+const _out = { x: 0, y: 0, z: 0, t: 0, bright: 1, spin: 1, phase: null, freq: null, aux: 0 };
+const _c = new THREE.Color();
+
+/** Generate a formation into the target arrays (positions, dimmed colours, caches). */
+function bakeTargets(def) {
+  for (let i = 0; i < N; i++) {
+    _out.x = 0; _out.y = 0; _out.z = 0;
+    _out.t = 0.5; _out.bright = 1; _out.spin = 1; _out.phase = null; _out.freq = null; _out.aux = 0;
+    def.generate(i, N, _out, rnd1[i], rnd2[i], rnd3[i]);
+
+    const i3 = i * 3;
+    targetPos[i3] = _out.x;
+    targetPos[i3 + 1] = _out.y;
+    targetPos[i3 + 2] = _out.z;
+
+    // Centre dimming: particles crossing the logo zone stay quiet so the
+    // logo never blends in, whatever the formation does.
+    const d = Math.sqrt(_out.x * _out.x + _out.y * _out.y + _out.z * _out.z);
+    const dim = Math.min(Math.max((d - 4) / 6, 0.22), 1) * _out.bright;
+
+    _c.copy(ACCENT_A).lerp(ACCENT_B, _out.t).multiplyScalar(dim);
+    targetCol[i3] = _c.r;
+    targetCol[i3 + 1] = _c.g;
+    targetCol[i3 + 2] = _c.b;
+
+    pendSpin[i] = _out.spin;
+    pendPhase[i] = _out.phase == null ? rnd2[i] * Math.PI * 2 : _out.phase;
+    pendFreq[i] = _out.freq == null ? 0.6 + rnd3[i] * 1.4 : _out.freq;
+    pendAux[i] = _out.aux;
+  }
+}
+
+/** Commit baked targets as the live formation (rebuild cylindrical caches). */
+function commitTargets(def) {
+  basePos.set(targetPos);
+  spinMul.set(pendSpin);
+  turbPhase.set(pendPhase);
+  turbFreq.set(pendFreq);
+  auxA.set(pendAux);
+  const axisZ = def.spinAxis === 'z';
+  for (let i = 0; i < N; i++) {
+    const i3 = i * 3;
+    const x = basePos[i3], y = basePos[i3 + 1], z = basePos[i3 + 2];
+    if (axisZ) {
+      baseRadius[i] = Math.sqrt(x * x + y * y);
+      baseAngle[i] = Math.atan2(y, x);
+      baseAxis[i] = z;
+    } else {
+      baseRadius[i] = Math.sqrt(x * x + z * z);
+      baseAngle[i] = Math.atan2(z, x);
+      baseAxis[i] = y;
+    }
+  }
+  colors.set(targetCol);
+  particleGeo.attributes.color.needsUpdate = true;
+  spinAccum = 0;
+  flowAccum = 0;
+}
+
 /* ---------------------------------------------------------------------------
- * 5. Central logo — 3D additive plane + glow aura (graceful if PNG missing)
+ * 5. Centre stack — dark halo, glow aura, pink & green logos (auto-contrast)
  * ------------------------------------------------------------------------- */
 const logoGroup = new THREE.Group();
 world.add(logoGroup);
 
-// Glow aura sits behind the logo; tint sits between the two accents.
-const glowMat = new THREE.SpriteMaterial({
-  map: glowSprite,
-  color: ACCENT_A.clone().lerp(ACCENT_B, 0.5),
+// 5a. Dark halo disc: guarantees contrast behind the logo, always.
+const haloMat = new THREE.SpriteMaterial({
+  map: haloSprite,
   transparent: true,
   depthWrite: false,
+  depthTest: false,
+  opacity: 0.85,
+  fog: false,
+});
+const halo = new THREE.Sprite(haloMat);
+halo.scale.set(30, 30, 1);
+halo.renderOrder = 14;
+logoGroup.add(halo);
+
+// 5b. Additive glow aura (bass-reactive, tinted to the active logo variant).
+const glowMat = new THREE.SpriteMaterial({
+  map: glowSprite,
+  color: ACCENT_B.clone(),
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
   blending: THREE.AdditiveBlending,
-  opacity: 0.35,
+  opacity: 0.16,
+  fog: false,
 });
 const GLOW_BASE = 18;
 const glow = new THREE.Sprite(glowMat);
 glow.scale.set(GLOW_BASE, GLOW_BASE, 1);
+glow.renderOrder = 15;
 logoGroup.add(glow);
 
-let logo = null;          // THREE.Mesh once (if) the texture loads
-let logoBaseScale = 12;   // set from the image aspect ratio on load
+// 5c. Two logo variants; the director crossfades to whichever CONTRASTS with
+// the style's centre hue (pink centre -> green logo, and vice versa).
+const logos = { pink: null, green: null }; // THREE.Mesh (or null if load failed)
+let activeVariant = 'green';
 
-new THREE.TextureLoader().load(
-  LOGO_URL,
-  (tex) => {
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    const aspect = (tex.image && tex.image.width / tex.image.height) || 1;
-    const h = 11;
-    const w = h * aspect;
-    logoBaseScale = 1; // the geometry already carries physical size; scale is a multiplier
-    const geo = new THREE.PlaneGeometry(w, h);
-    // Normal alpha blend + no depth test so the crisp wordmark reads cleanly
-    // ON TOP of the bright additive vortex (additive would wash it out); the
-    // separate glow sprite behind it still provides the additive aura.
-    const mat = new THREE.MeshBasicMaterial({
-      map: tex,
-      transparent: true,
-      depthWrite: false,
-      depthTest: false,
-      blending: THREE.NormalBlending,
-    });
-    logo = new THREE.Mesh(geo, mat);
-    logo.renderOrder = 20; // draw after the particles
-    logoGroup.add(logo);
-    gsap.fromTo(
-      logo.scale,
-      { x: 0.001, y: 0.001, z: 0.001 },
-      { x: 1, y: 1, z: 1, duration: 1.4, ease: 'expo.out' }
-    );
-  },
+function makeLogoMesh(tex, initialOpacity) {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const aspect = (tex.image && tex.image.width / tex.image.height) || 1;
+  const h = 11;
+  const geo = new THREE.PlaneGeometry(h * aspect, h);
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.NormalBlending,
+    opacity: initialOpacity,
+    fog: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 20;
+  logoGroup.add(mesh);
+  return mesh;
+}
+
+const texLoader = new THREE.TextureLoader();
+texLoader.load(LOGO_PINK_URL,
+  (t) => { logos.pink = makeLogoMesh(t, activeVariant === 'pink' ? 1 : 0); },
   undefined,
-  () => {
-    // No logo present — the aura alone marks the centre. App keeps running.
-    console.info('[SAMSEN-45] No /resource/logo.png found — running vortex only.');
-    glowMat.opacity = 0.16;
-  }
-);
+  () => console.info('[SAMSEN-45] pink logo missing — continuing without it.'));
+texLoader.load(LOGO_GREEN_URL,
+  (t) => { logos.green = makeLogoMesh(t, activeVariant === 'green' ? 1 : 0); },
+  undefined,
+  () => console.info('[SAMSEN-45] green logo missing — continuing without it.'));
 
-/* Keep the logo/glow always facing the camera (billboard the plane too). */
-function faceCamera() {
-  if (logo) logo.quaternion.copy(camera.quaternion);
+function setLogoVariant(variant) {
+  activeVariant = variant;
+  const show = logos[variant] || logos[variant === 'pink' ? 'green' : 'pink'];
+  for (const key of ['pink', 'green']) {
+    const mesh = logos[key];
+    if (!mesh) continue;
+    gsap.to(mesh.material, { opacity: mesh === show ? 1 : 0, duration: 1.2, ease: 'power2.inOut', overwrite: 'auto' });
+  }
+  const accent = variant === 'pink' ? ACCENT_A : ACCENT_B;
+  const tint = accent.clone().lerp(WHITE, 0.25);
+  gsap.to(glowMat.color, { r: tint.r, g: tint.g, b: tint.b, duration: 1.2, overwrite: 'auto' });
+}
+
+/* 5d. Theme-word satellite (REBOOT / REUNITE / ... orbiting outside the logo zone) */
+const wordTextures = new Array(WORD_URLS.length).fill(null);
+WORD_URLS.forEach((url, k) => loadInkTexture(url).then((t) => {
+  wordTextures[k] = t;
+  // If this word belongs to the style currently on stage, (re)show it.
+  if (t && !wordSprite.visible && director.idx % wordTextures.length === k) {
+    setWord(director.idx, activeVariant);
+  }
+}));
+
+const wordMat = new THREE.SpriteMaterial({
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  opacity: 0,
+  color: ACCENT_B.clone(),
+  fog: false,
+});
+const wordSprite = new THREE.Sprite(wordMat);
+wordSprite.renderOrder = 13;
+wordSprite.visible = false;
+scene.add(wordSprite); // in scene root so the world tumble never skews it
+
+function setWord(styleIdx, variant) {
+  const tex = wordTextures[styleIdx % wordTextures.length];
+  const accent = variant === 'pink' ? ACCENT_A : ACCENT_B;
+  gsap.to(wordMat, {
+    opacity: 0, duration: 0.5, overwrite: 'auto',
+    onComplete: () => {
+      if (!tex) { wordSprite.visible = false; return; }
+      wordMat.map = tex;
+      wordMat.needsUpdate = true;
+      wordMat.color.copy(accent).lerp(WHITE, 0.3);
+      const h = 3.4;
+      wordSprite.scale.set(h * (tex.userData.aspect || 3), h, 1);
+      wordSprite.visible = true;
+      gsap.to(wordMat, { opacity: 0.42, duration: 1.2 });
+    },
+  });
 }
 
 /* ---------------------------------------------------------------------------
@@ -242,15 +389,17 @@ function faceCamera() {
  * ------------------------------------------------------------------------- */
 const splash = document.getElementById('splash');
 const statusEl = document.getElementById('splash-status');
+const brandEl = document.getElementById('brand');
 const btnMic = document.getElementById('btn-mic');
 const btnFile = document.getElementById('btn-file');
 const fileInput = document.getElementById('file-input');
+const BRAND_TEXT = brandEl.textContent;
 
 let audioCtx = null;
 let analyser = null;
-let freqData = null;   // Uint8Array frequency bins
-let binHz = 0;         // Hz per FFT bin (derived from real sampleRate)
-let currentSource = null; // active source node (so file re-loads can stop it)
+let freqData = null;
+let binHz = 0;
+let currentSource = null;
 let running = false;
 
 // Smoothed, normalised audio state (0..1). GSAP eases raw values into these.
@@ -258,6 +407,7 @@ const audio = { bass: 0, mids: 0, highs: 0 };
 const setBass = gsap.quickTo(audio, 'bass', { duration: 0.16, ease: 'power2.out' });
 const setMids = gsap.quickTo(audio, 'mids', { duration: 0.2, ease: 'power2.out' });
 const setHighs = gsap.quickTo(audio, 'highs', { duration: 0.14, ease: 'power2.out' });
+let energyRaw = 0; // instantaneous, for song-change detection
 
 function ensureContext() {
   if (!audioCtx) {
@@ -272,7 +422,6 @@ function ensureContext() {
   return audioCtx.resume();
 }
 
-/** Average the (normalised) magnitude across a frequency window in Hz. */
 function bandAvg(loHz, hiHz) {
   const lo = Math.max(0, Math.floor(loHz / binHz));
   const hi = Math.min(freqData.length - 1, Math.ceil(hiHz / binHz));
@@ -294,11 +443,7 @@ async function startMic() {
     setStatus('Requesting microphone…');
     await ensureContext();
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        autoGainControl: false,
-        noiseSuppression: false,
-      },
+      audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false },
     });
     const src = audioCtx.createMediaStreamSource(stream);
     connectSource(src); // NB: mic is not routed to destination (avoids feedback)
@@ -329,17 +474,14 @@ async function startFile(file) {
 function launch(message) {
   setStatus(message, 'ok');
   running = true;
+  director.lastSwitch = clock.elapsedTime;
   gsap.to(splash, {
     duration: 0.9,
     ease: 'power2.inOut',
     onStart: () => splash.classList.add('hidden'),
   });
-  // Cinematic entry push.
-  gsap.fromTo(
-    camera.position,
-    { z: 90 },
-    { z: 46, duration: 2.4, ease: 'expo.out' }
-  );
+  gsap.fromTo(camera.position, { z: 90 },
+    { z: FORMATIONS[director.idx].camZ, duration: 2.4, ease: 'expo.out' });
 }
 
 function setStatus(msg, cls = '') {
@@ -357,55 +499,32 @@ fileInput.addEventListener('change', (e) => {
 /* ---------------------------------------------------------------------------
  * 7. Kick detection — fast-attack envelope on the bass band -> "drop" reaction
  * ------------------------------------------------------------------------- */
-let bassBaseline = 0;      // slowly-tracked floor to measure spikes against
+let bassBaseline = 0;
 let lastKick = 0;
 const kickState = { pulse: 0 };  // 0..1, GSAP-driven flash amount
-const colorState = { mix: 0 };   // 0..1, crimson-field -> green-flash on drops
-let swirlBoost = 0;              // transient extra angular velocity
+const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
+let flashColor = ACCENT_B.clone(); // per style: the accent OPPOSITE its centre
+let swirlBoost = 0;
 
 function onKick(strength) {
-  // Bloom flare.
   gsap.to(bloomPass, {
     strength: BLOOM_BASE + 1.6 * strength,
-    duration: 0.09,
-    ease: 'power3.out',
-    yoyo: true,
-    repeat: 1,
-    overwrite: 'auto',
+    duration: 0.09, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
-  // Crimson -> green colour shift across the whole field.
   gsap.to(colorState, {
-    mix: 1,
-    duration: 0.11,
-    ease: 'power1.inOut',
-    yoyo: true,
-    repeat: 1,
-    overwrite: 'auto',
+    mix: 1, duration: 0.11, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
   });
-  // Logo / aura punch.
   gsap.to(kickState, {
-    pulse: 1,
-    duration: 0.1,
-    ease: 'power3.out',
-    yoyo: true,
-    repeat: 1,
-    overwrite: 'auto',
+    pulse: 1, duration: 0.1, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
-  // Vortex explodes into hyper-speed swirl, then decays each frame.
   swirlBoost = Math.min(swirlBoost + 2.4 * strength, 5);
-  // Camera dolly kick.
   gsap.to(camera.position, {
-    z: '-=2.2',
-    duration: 0.12,
-    ease: 'power2.out',
-    yoyo: true,
-    repeat: 1,
-    overwrite: false,
+    z: '-=2.2', duration: 0.12, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: false,
   });
+  director.onKick(strength);
 }
 
 function detectKick(rawBass, t) {
-  // Track a slow baseline; a kick is a sharp excursion above it.
   bassBaseline += (rawBass - bassBaseline) * 0.05;
   const excess = rawBass - bassBaseline;
   if (rawBass > 0.5 && excess > 0.11 && t - lastKick > 0.16) {
@@ -415,7 +534,135 @@ function detectKick(rawBass, t) {
 }
 
 /* ---------------------------------------------------------------------------
- * 8. Debounced resize (ultrawide / projector safe)
+ * 8. Style director — hybrid auto-switching between the 16 formations
+ *    Triggers: new-song (>=2s silence then sound), big drops after 20s dwell,
+ *    60s fallback. Transitions are 1.65s particle morphs.
+ * ------------------------------------------------------------------------- */
+const morph = { active: false, mix: 0 };
+const motion = { ramp: 1 }; // turbulence ramps back in after each morph
+let morphTween = null;     // kept so tests/VJs can jump-cut (SAMSEN.skip)
+
+const director = {
+  idx: 0,
+  bag: [],
+  lastSwitch: 0,
+  silentFor: 0,
+  captionTimer: null,
+
+  next() {
+    if (this.bag.length === 0) {
+      this.bag = FORMATIONS.map((_, k) => k).filter((k) => k !== this.idx);
+      for (let i = this.bag.length - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        [this.bag[i], this.bag[j]] = [this.bag[j], this.bag[i]];
+      }
+    }
+    return this.bag.pop();
+  },
+
+  dwell(t) { return t - this.lastSwitch; },
+
+  onKick(strength) {
+    if (!running || morph.active) return;
+    if (strength > 0.55 && this.dwell(clock.elapsedTime) > 20) this.switch('drop');
+  },
+
+  update(dt, t) {
+    if (!running || morph.active) return;
+    // New-song detection: sustained near-silence, then the music returns.
+    if (energyRaw < 0.035) {
+      this.silentFor += dt;
+    } else {
+      if (this.silentFor >= 2 && this.dwell(t) > 6) this.switch('song');
+      this.silentFor = 0;
+    }
+    // Fallback: never let one style overstay.
+    if (this.dwell(t) > 60) this.switch('timer');
+  },
+
+  switch(reason, forcedIdx = null) {
+    if (morph.active) return;
+    const idx = forcedIdx == null ? this.next() : forcedIdx;
+    const def = FORMATIONS[idx];
+    this.idx = idx;
+    this.lastSwitch = clock.elapsedTime;
+    this.silentFor = 0;
+    startMorph(def);
+    // Branding reacts: contrasting logo variant + next theme word.
+    const variant = def.hue === 'pink' ? 'green' : 'pink';
+    setLogoVariant(variant);
+    setWord(idx, variant);
+    flashColor = (def.hue === 'pink' ? ACCENT_B : ACCENT_A).clone();
+    this.caption(def.name);
+    console.info(`[SAMSEN-45] style -> ${def.name} (${reason})`);
+  },
+
+  caption(name) {
+    brandEl.textContent = name.toUpperCase();
+    if (this.captionTimer) this.captionTimer.kill();
+    this.captionTimer = gsap.delayedCall(3, () => { brandEl.textContent = BRAND_TEXT; });
+  },
+};
+
+function startMorph(def) {
+  bakeTargets(def);
+  fromPos.set(positions);
+  fromCol.set(colors);
+  morph.active = true;
+  morph.mix = 0;
+  motion.ramp = 0;
+  morphTween = gsap.to(morph, {
+    mix: 1, duration: 1.65, ease: 'power3.inOut', overwrite: 'auto',
+    onComplete: () => {
+      morph.active = false;
+      commitTargets(def);
+      gsap.to(motion, { ramp: 1, duration: 0.7, ease: 'power1.out', overwrite: 'auto' });
+    },
+  });
+  // Re-frame the shape: tilt, camera distance, and a bloom swell mid-morph.
+  gsap.to(particles.rotation, { x: def.tiltX, z: def.tiltZ, duration: 1.65, ease: 'power2.inOut', overwrite: 'auto' });
+  if (running) gsap.to(camera.position, { z: def.camZ, duration: 2, ease: 'power2.inOut', overwrite: 'auto' });
+  gsap.to(bloomPass, {
+    strength: BLOOM_BASE + 0.9, duration: 0.82, ease: 'power2.in',
+    yoyo: true, repeat: 1, overwrite: 'auto',
+  });
+}
+
+/** Boot: apply style 0 instantly (no morph). */
+function applyStyleInstant(idx) {
+  const def = FORMATIONS[idx];
+  director.idx = idx;
+  bakeTargets(def);
+  commitTargets(def);
+  positions.set(targetPos);
+  particleGeo.attributes.position.needsUpdate = true;
+  particles.rotation.x = def.tiltX;
+  particles.rotation.z = def.tiltZ;
+  camera.position.z = def.camZ;
+  const variant = def.hue === 'pink' ? 'green' : 'pink';
+  activeVariant = variant;
+  setWord(idx, variant);
+  flashColor = (def.hue === 'pink' ? ACCENT_B : ACCENT_A).clone();
+  glowMat.color.copy(variant === 'pink' ? ACCENT_A : ACCENT_B).lerp(WHITE, 0.25);
+}
+
+// Manual override (VJ / testing): arrow key or window.SAMSEN.next()
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') director.switch('manual');
+});
+window.SAMSEN = {
+  next: (i) => director.switch('manual', typeof i === 'number' ? i : null),
+  skip: () => { if (morphTween) morphTween.progress(1); }, // jump-cut a morph
+  fx: { afterimage: afterimagePass, bloom: bloomPass },
+  styles: FORMATIONS.map((f) => f.name),
+  debug: () => ({
+    active: morph.active, mix: +morph.mix.toFixed(3), ramp: +motion.ramp.toFixed(3),
+    idx: director.idx, t: +clock.elapsedTime.toFixed(1), gsapTime: +gsap.ticker.time.toFixed(1),
+  }),
+};
+
+/* ---------------------------------------------------------------------------
+ * 9. Debounced resize (ultrawide / projector safe)
  * ------------------------------------------------------------------------- */
 let resizeTimer = null;
 function applyResize() {
@@ -434,11 +681,12 @@ window.addEventListener('resize', () => {
 });
 
 /* ---------------------------------------------------------------------------
- * 9. Render loop — delta-timed for a smooth, frame-rate-independent 60fps
+ * 10. Render loop — delta-timed for a smooth, frame-rate-independent 60fps
  * ------------------------------------------------------------------------- */
 const clock = new THREE.Clock();
 let spinAccum = 0;
-const _pos = particleGeo.attributes.position.array;
+let flowAccum = 0;
+const bandVals = [0, 0, 0];
 
 function updateAudio(t) {
   if (!running || !analyser) return;
@@ -446,61 +694,121 @@ function updateAudio(t) {
   const rawBass = bandAvg(0, 150);
   const rawMids = bandAvg(150, 2000);
   const rawHighs = bandAvg(2000, binHz * freqData.length);
+  energyRaw = (rawBass + rawMids + rawHighs) / 3;
   setBass(rawBass);
   setMids(rawMids);
   setHighs(rawHighs);
   detectKick(rawBass, t);
 }
 
-function updateVortex(dt, time) {
+function updateMorph() {
+  const m = morph.mix;
+  const burst = Math.sin(m * Math.PI) * 7;
+  for (let i = 0; i < N; i++) {
+    const i3 = i * 3;
+    let x = fromPos[i3] + (targetPos[i3] - fromPos[i3]) * m;
+    let y = fromPos[i3 + 1] + (targetPos[i3 + 1] - fromPos[i3 + 1]) * m;
+    let z = fromPos[i3 + 2] + (targetPos[i3 + 2] - fromPos[i3 + 2]) * m;
+    const len = Math.sqrt(x * x + y * y + z * z) + 1e-4;
+    const push = burst * rnd1[i] / len;
+    positions[i3] = x + x * push;
+    positions[i3 + 1] = y + y * push;
+    positions[i3 + 2] = z + z * push;
+    colors[i3] = fromCol[i3] + (targetCol[i3] - fromCol[i3]) * m;
+    colors[i3 + 1] = fromCol[i3 + 1] + (targetCol[i3 + 1] - fromCol[i3 + 1]) * m;
+    colors[i3 + 2] = fromCol[i3 + 2] + (targetCol[i3 + 2] - fromCol[i3 + 2]) * m;
+  }
+  particleGeo.attributes.position.needsUpdate = true;
+  particleGeo.attributes.color.needsUpdate = true;
+}
+
+function updateFormation(dt, time) {
+  const def = FORMATIONS[director.idx];
   const { bass, mids } = audio;
 
-  // Angular velocity: lazy drift when quiet, hyper-swirl on bass + kick boost.
-  const angVel = (0.06 + bass * 0.9 + swirlBoost) * dt;
+  // Swirl: lazy drift when quiet, hyper-speed on bass + kick bursts.
+  const angVel = def.spinSpeed * (0.05 + bass * 0.85 + swirlBoost) * dt;
   spinAccum += angVel;
-  swirlBoost *= Math.pow(0.02, dt); // fast exponential decay of the kick burst
+  swirlBoost *= Math.pow(0.02, dt);
+  if (def.flow) flowAccum += def.flow.speed * (0.35 + bass) * dt;
 
-  // Turbulence amplitude/frequency scale with mids (and a touch of bass).
-  const turbAmp = 0.6 + mids * 4.2 + bass * 1.2;
-  const turbSpeed = 0.5 + mids * 2.5;
-  const tt = time * turbSpeed;
+  const turbAmp = def.turbAmp * (0.5 + mids * 4 + bass * 1.1) * motion.ramp;
+  const tt = time * (0.5 + mids * 2.4) * def.turbFreq;
+  const axisZ = def.spinAxis === 'z';
+  const flowMin = def.flow ? def.flow.min : 0;
+  const flowRange = def.flow ? def.flow.max - def.flow.min : 0;
+  bandVals[0] = audio.bass; bandVals[1] = audio.mids; bandVals[2] = audio.highs;
 
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
+  for (let i = 0; i < N; i++) {
     const i3 = i * 3;
-    const r = baseRadius[i];
-    const a = baseAngle[i] + spinAccum * spinSeed[i];
+    const a = baseAngle[i] + spinAccum * spinMul[i];
+    const f = turbFreq[i], ph = turbPhase[i];
+    const wobR = Math.sin(tt * f + ph) * turbAmp * (0.25 + baseRadius[i] * 0.02);
+    const rr = baseRadius[i] + wobR;
 
-    // Layered-sine turbulence field (allocation-free "noise" displacement).
-    const ph = turbPhase[i];
-    const f = turbFreq[i];
-    const wobR = Math.sin(tt * f + ph) * turbAmp * (0.25 + r * 0.02);
-    const wobY = Math.cos(tt * f * 0.7 + ph * 1.3) * turbAmp * 0.5;
+    let ax = baseAxis[i];
+    let wobY = Math.cos(tt * f * 0.7 + ph * 1.3) * turbAmp * 0.5;
+    if (def.flow) {
+      const off = (ax - flowMin + flowAccum * (0.6 + 0.4 * Math.abs(spinMul[i]))) % flowRange;
+      ax = flowMin + (off < 0 ? off + flowRange : off);
+    }
+    if (def.eq) {
+      const band = auxA[i] | 0;
+      const frac = (auxA[i] - band) / 0.9;
+      ax = -7 + frac * (2 + bandVals[band] * 16);
+      wobY = 0;
+    }
 
-    const rr = r + wobR;
-    _pos[i3] = Math.cos(a) * rr;
-    _pos[i3 + 1] = baseY[i] + wobY;
-    _pos[i3 + 2] = Math.sin(a) * rr;
+    if (axisZ) {
+      positions[i3] = Math.cos(a) * rr;
+      positions[i3 + 1] = Math.sin(a) * rr;
+      positions[i3 + 2] = ax + wobY;
+    } else {
+      positions[i3] = Math.cos(a) * rr;
+      positions[i3 + 1] = ax + wobY;
+      positions[i3 + 2] = Math.sin(a) * rr;
+    }
   }
   particleGeo.attributes.position.needsUpdate = true;
 
-  // Global crimson-field -> green-flash multiplier (kick-driven).
-  particleMat.color.copy(WHITE).lerp(ACCENT_B, colorState.mix * 0.85);
+  // Kick colour flash toward the style's contrast accent.
+  particleMat.color.copy(WHITE).lerp(flashColor, colorState.mix * 0.85);
   particleMat.size = PARTICLE_SIZE + bass * 0.5 + kickState.pulse * 0.3;
 
-  // Whole-system slow tumble for depth.
-  world.rotation.y += dt * 0.05;
-  world.rotation.z = Math.sin(time * 0.1) * 0.06;
+  // Whole-system slow tumble for depth (skip for camera-axis styles).
+  if (!axisZ) {
+    world.rotation.y += dt * 0.05;
+    world.rotation.z = Math.sin(time * 0.1) * 0.06;
+  } else {
+    world.rotation.y *= 0.98;
+    world.rotation.z *= 0.98;
+  }
 }
 
-function updateLogo() {
+function updateCenterStack() {
   const { bass } = audio;
+  // Bass pulse scales the whole stack; aura opacity/haloprotection breathe too.
   const s = 1 + bass * 0.4 + kickState.pulse * 0.35;
-  if (logo) logo.scale.setScalar(s);
-  // Aura expands on heavy bass / drops.
+  logoGroup.scale.setScalar(s);
   const gs = GLOW_BASE * (1 + bass * 0.55 + kickState.pulse * 0.7);
   glow.scale.set(gs, gs, 1);
   glowMat.opacity = 0.16 + bass * 0.45 + kickState.pulse * 0.4;
-  faceCamera();
+  haloMat.opacity = 0.78 + bass * 0.14;
+  for (const key of ['pink', 'green']) {
+    if (logos[key]) logos[key].quaternion.copy(camera.quaternion);
+  }
+}
+
+function updateSatellite(time) {
+  if (!wordSprite.visible) return;
+  const a = time * 0.12;
+  wordSprite.position.set(
+    Math.cos(a) * 24,
+    9 + Math.sin(time * 0.4) * 2,
+    Math.sin(a) * 24
+  );
+  // Mids make the word shimmer (base opacity owned by the GSAP fades).
+  wordSprite.material.rotation = Math.sin(time * 0.5) * 0.04;
 }
 
 // Smooth procedural camera drift; damp-lerp toward it so trails sweep gently.
@@ -509,7 +817,7 @@ function updateCamera(time) {
   camTarget.set(
     Math.sin(time * 0.13) * 6,
     Math.cos(time * 0.17) * 3,
-    camera.position.z // z owned by launch/kick tweens
+    camera.position.z // z owned by launch/kick/style tweens
   );
   camera.position.x += (camTarget.x - camera.position.x) * 0.02;
   camera.position.y += (camTarget.y - camera.position.y) * 0.02;
@@ -518,16 +826,22 @@ function updateCamera(time) {
 
 function tick() {
   requestAnimationFrame(tick);
-  const dt = Math.min(clock.getDelta(), 0.05); // clamp to avoid tab-switch jumps
+  const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
 
   updateAudio(time);
-  updateVortex(dt, time);
-  updateLogo();
+  director.update(dt, time);
+  if (morph.active) updateMorph();
+  else updateFormation(dt, time);
+  updateCenterStack();
+  updateSatellite(time);
   updateCamera(time);
 
   composer.render();
 }
 
+applyStyleInstant(0);
 applyResize();
 tick();
+console.info('[SAMSEN-45] 16 styles loaded:', window.SAMSEN.styles.join(' · '),
+  '\nAuto-switching: new-song / big-drop / 60s. Manual: ArrowRight or SAMSEN.next(i).');
