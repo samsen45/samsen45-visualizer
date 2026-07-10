@@ -1,0 +1,19 @@
+{
+  "name": "samsen45-visualizer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SAMSEN-45 — cinematic 3D audio-reactive music visualizer (Three.js + GSAP + Vite)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "gsap": "^3.12.5",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
