@@ -20,7 +20,7 @@ import { gsap } from 'gsap';
  * ------------------------------------------------------------------------- */
 const VOID = new THREE.Color('#0a051b');
 const ACCENT_A = new THREE.Color('#ff007f'); // electric crimson / hot pink
-const ACCENT_B = new THREE.Color('#00f0ff'); // electric cyan / neon teal
+const ACCENT_B = new THREE.Color('#66ff33'); // electric neon green
 const WHITE = new THREE.Color('#ffffff');
 
 const PARTICLE_COUNT = 40000;
@@ -120,7 +120,7 @@ const baseY = new Float32Array(PARTICLE_COUNT);
 const spinSeed = new Float32Array(PARTICLE_COUNT); // inner particles spin faster
 const turbPhase = new Float32Array(PARTICLE_COUNT);
 const turbFreq = new Float32Array(PARTICLE_COUNT);
-const hueT = new Float32Array(PARTICLE_COUNT); // 0=crimson .. 1=cyan (static gradient)
+const hueT = new Float32Array(PARTICLE_COUNT); // 0=crimson .. 1=green (static gradient)
 
 const _c = new THREE.Color();
 for (let i = 0; i < PARTICLE_COUNT; i++) {
@@ -143,7 +143,7 @@ for (let i = 0; i < PARTICLE_COUNT; i++) {
   positions[i3 + 1] = baseY[i];
   positions[i3 + 2] = Math.sin(angle) * r;
 
-  // Static radial gradient crimson (core) -> cyan (rim), with slight noise.
+  // Static radial gradient crimson (core) -> green (rim), with slight noise.
   const t = THREE.MathUtils.clamp(r / GALAXY_RADIUS + (Math.random() - 0.5) * 0.15, 0, 1);
   hueT[i] = t;
   _c.copy(ACCENT_A).lerp(ACCENT_B, t);
@@ -360,7 +360,7 @@ fileInput.addEventListener('change', (e) => {
 let bassBaseline = 0;      // slowly-tracked floor to measure spikes against
 let lastKick = 0;
 const kickState = { pulse: 0 };  // 0..1, GSAP-driven flash amount
-const colorState = { mix: 0 };   // 0..1, crimson-field -> cyan-flash on drops
+const colorState = { mix: 0 };   // 0..1, crimson-field -> green-flash on drops
 let swirlBoost = 0;              // transient extra angular velocity
 
 function onKick(strength) {
@@ -373,7 +373,7 @@ function onKick(strength) {
     repeat: 1,
     overwrite: 'auto',
   });
-  // Crimson -> cyan colour shift across the whole field.
+  // Crimson -> green colour shift across the whole field.
   gsap.to(colorState, {
     mix: 1,
     duration: 0.11,
@@ -483,7 +483,7 @@ function updateVortex(dt, time) {
   }
   particleGeo.attributes.position.needsUpdate = true;
 
-  // Global crimson-field -> cyan-flash multiplier (kick-driven).
+  // Global crimson-field -> green-flash multiplier (kick-driven).
   particleMat.color.copy(WHITE).lerp(ACCENT_B, colorState.mix * 0.85);
   particleMat.size = PARTICLE_SIZE + bass * 0.5 + kickState.pulse * 0.3;
 
