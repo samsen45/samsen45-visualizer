@@ -554,9 +554,13 @@ function onKick(strength) {
     mix: 1, duration: 0.11, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(kickState, {
-    pulse: 1, duration: 0.1, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
+    keyframes: [
+      { pulse: 1, duration: 0.06, ease: 'power3.out' },  // hit
+      { pulse: 0, duration: 0.3, ease: 'power2.out' },   // decay
+    ],
+    overwrite: 'auto',
   });
-  swirlBoost = Math.min(swirlBoost + 2.4 * strength, 5);
+  swirlBoost = Math.min(swirlBoost + 3.0 * strength, 6);
   gsap.to(camera.position, {
     z: '-=2.2', duration: 0.12, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: false,
   });
@@ -778,14 +782,21 @@ function updateFormation(dt, time) {
   const def = FORMATIONS[director.idx];
   const { bass, mids } = audio;
 
-  // Swirl: lazy drift when quiet, hyper-speed on bass + kick bursts.
-  const angVel = def.spinSpeed * (0.05 + bass * 0.85 + swirlBoost) * dt;
+  // Movement is BASS-driven: the low end swirls, thumps and shakes the field;
+  // mids only add a light shimmer on top (they must not steer the motion).
+  const angVel = def.spinSpeed * (0.05 + bass * 1.15 + swirlBoost) * dt;
   spinAccum += angVel;
   swirlBoost *= Math.pow(0.02, dt);
-  if (def.flow) flowAccum += def.flow.speed * (0.35 + bass) * dt;
+  if (def.flow) {
+    flowAccum += def.flow.speed * (0.3 + bass * 1.2 + kickState.pulse * 0.8) * dt;
+  }
 
-  const turbAmp = def.turbAmp * (0.5 + mids * 4 + bass * 1.1) * motion.ramp;
-  const tt = time * (0.5 + mids * 2.4) * def.turbFreq;
+  // Whole-formation radial THUMP on each kick (plus a breath with the bass).
+  const beatPunch = 1 + kickState.pulse * 0.16 + bass * 0.05;
+
+  const turbAmp = def.turbAmp
+    * (0.35 + bass * 3.4 + kickState.pulse * 1.8 + mids * 0.7) * motion.ramp;
+  const tt = time * (0.4 + bass * 2.2) * def.turbFreq;
   const axisZ = def.spinAxis === 'z';
   const flowMin = def.flow ? def.flow.min : 0;
   const flowRange = def.flow ? def.flow.max - def.flow.min : 0;
@@ -796,7 +807,7 @@ function updateFormation(dt, time) {
     const a = baseAngle[i] + spinAccum * spinMul[i];
     const f = turbFreq[i], ph = turbPhase[i];
     const wobR = Math.sin(tt * f + ph) * turbAmp * (0.25 + baseRadius[i] * 0.02);
-    const rr = baseRadius[i] + wobR;
+    const rr = baseRadius[i] * beatPunch + wobR;
 
     let ax = baseAxis[i];
     let wobY = Math.cos(tt * f * 0.7 + ph * 1.3) * turbAmp * 0.5;
