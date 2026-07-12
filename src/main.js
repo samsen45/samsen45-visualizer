@@ -558,7 +558,11 @@ const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
 // between beats move the field but never strobe the logo.
 const kickIntervals = [];
 let beatPeriod = 0;   // seconds per beat (0 = not locked yet)
+let tempoConf = 0;    // 0..1: how consistent recent intervals are
 let lastStrongBeat = -10;
+let nextBeatAt = 0;   // predicted time of the next beat (predictive flashing)
+let avgKickStrength = 0.6;
+let lastFlashAt = -10;
 
 function classifyKick(t) {
   const interval = t - lastKick;
@@ -568,6 +572,11 @@ function classifyKick(t) {
     if (kickIntervals.length >= 3) {
       const sorted = [...kickIntervals].sort((a, b) => a - b);
       beatPeriod = sorted[sorted.length >> 1]; // median
+      let within = 0;
+      for (const iv of kickIntervals) {
+        if (Math.abs(iv - beatPeriod) < beatPeriod * 0.12) within++;
+      }
+      tempoConf = within / kickIntervals.length;
     }
   }
   if (!beatPeriod) return true; // no lock yet -> treat as on-beat
@@ -575,10 +584,29 @@ function classifyKick(t) {
   const nearest = Math.round(phase);
   return nearest >= 1 && Math.abs(phase - nearest) < 0.18;
 }
+
+/**
+ * Predictive flashing: with a confident tempo lock, fire the flash AT the
+ * predicted beat time — zero effective latency, and soft kicks the detector
+ * misses still flash on the grid. Detections re-anchor the phase. Guards:
+ * suspends the moment kicks drop out (breakdown) or energy dies (silence).
+ */
+function updateBeatPredictor(t) {
+  if (!running || !beatPeriod || tempoConf < 0.6 || kickIntervals.length < 4) return;
+  if (t - lastKick > beatPeriod * 4) return; // beat dropped out — stop predicting
+  if (energyRaw < 0.08) return;              // near-silence
+  if (nextBeatAt <= 0) nextBeatAt = lastStrongBeat + beatPeriod;
+  if (t >= nextBeatAt) {
+    if (t - nextBeatAt < 0.08) fireBeat(avgKickStrength * 0.9, t); // on time only
+    while (nextBeatAt <= t) nextBeatAt += beatPeriod; // advance, never burst
+  }
+}
 let flashColor = ACCENT_B.clone(); // per style: the accent OPPOSITE its centre
 let swirlBoost = 0;
 
 function onKick(strength, onBeat) {
+  const t = clock.elapsedTime;
+  avgKickStrength += (strength - avgKickStrength) * 0.3;
   // Field motion reacts to every detected kick (musical energy)…
   gsap.to(kickState, {
     keyframes: [
@@ -589,10 +617,21 @@ function onKick(strength, onBeat) {
   });
   swirlBoost = Math.min(swirlBoost + 3.0 * strength, 6);
 
-  // …but the FLASHES (orb, bloom, colour, recoil, dolly) fire only on the
-  // tempo grid, so the logo pulses in time instead of strobing at random.
+  // …but the FLASHES fire only on the tempo grid — and each on-grid
+  // detection re-anchors the predictor's phase to the actual drum.
   if (!onBeat) return;
-  lastStrongBeat = clock.elapsedTime;
+  lastStrongBeat = t;
+  if (beatPeriod) nextBeatAt = t + beatPeriod;
+  fireBeat(strength, t);
+}
+
+/** The beat-flash group (orb, bloom, colour, recoil, dolly, style counter).
+ *  Reached from BOTH real detections and the predictor; the gap guard makes
+ *  sure one beat slot only ever flashes once. */
+function fireBeat(strength, t) {
+  const minGap = beatPeriod ? beatPeriod * 0.45 : 0.2;
+  if (t - lastFlashAt < minGap) return;
+  lastFlashAt = t;
   gsap.to(orbState, {
     keyframes: [
       { pulse: 1, duration: 0.028, ease: 'power4.out' },
@@ -967,6 +1006,7 @@ function tick() {
   const time = clock.elapsedTime;
 
   updateAudio(time);
+  updateBeatPredictor(time);
   director.update(dt, time);
   if (morph.active) updateMorph();
   else updateFormation(dt, time);
