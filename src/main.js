@@ -447,9 +447,9 @@ let running = false;
 
 // Smoothed, normalised audio state (0..1). GSAP eases raw values into these.
 const audio = { bass: 0, mids: 0, highs: 0 };
-const setBass = gsap.quickTo(audio, 'bass', { duration: 0.16, ease: 'power2.out' });
-const setMids = gsap.quickTo(audio, 'mids', { duration: 0.2, ease: 'power2.out' });
-const setHighs = gsap.quickTo(audio, 'highs', { duration: 0.14, ease: 'power2.out' });
+const setBass = gsap.quickTo(audio, 'bass', { duration: 0.09, ease: 'power2.out' });
+const setMids = gsap.quickTo(audio, 'mids', { duration: 0.14, ease: 'power2.out' });
+const setHighs = gsap.quickTo(audio, 'highs', { duration: 0.1, ease: 'power2.out' });
 let energyRaw = 0; // instantaneous, for song-change detection
 
 function ensureContext() {
@@ -457,10 +457,11 @@ function ensureContext() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;             // -> 256 frequency bins
-    // Low smoothing so kick TRANSIENTS survive — at 0.8 the FFT is such a
-    // slow loudness meter that continuous music reads as one flat plateau
-    // and the beat detector goes blind. GSAP smooths the levels downstream.
-    analyser.smoothingTimeConstant = 0.55;
+    // Minimal smoothing so kick TRANSIENTS hit the detector within a frame
+    // or two of the drum itself (higher values smear the attack and add
+    // 50ms+ of lag). GSAP smooths the level signals downstream; the
+    // adaptive threshold absorbs the extra frame-to-frame noise.
+    analyser.smoothingTimeConstant = 0.35;
     freqData = new Uint8Array(analyser.frequencyBinCount);
     // Hz per bin = nyquist / binCount = sampleRate / fftSize (~86 Hz @ 44.1k/512).
     binHz = audioCtx.sampleRate / 2 / analyser.frequencyBinCount;
@@ -581,7 +582,7 @@ function onKick(strength, onBeat) {
   // Field motion reacts to every detected kick (musical energy)…
   gsap.to(kickState, {
     keyframes: [
-      { pulse: 1, duration: 0.06, ease: 'power3.out' },  // hit
+      { pulse: 1, duration: 0.028, ease: 'power4.out' }, // hit NOW
       { pulse: 0, duration: 0.3, ease: 'power2.out' },   // decay
     ],
     overwrite: 'auto',
@@ -594,26 +595,26 @@ function onKick(strength, onBeat) {
   lastStrongBeat = clock.elapsedTime;
   gsap.to(orbState, {
     keyframes: [
-      { pulse: 1, duration: 0.06, ease: 'power3.out' },
+      { pulse: 1, duration: 0.028, ease: 'power4.out' },
       { pulse: 0, duration: 0.32, ease: 'power2.out' },
     ],
     overwrite: 'auto',
   });
   gsap.to(bloomPass, {
     strength: BLOOM_BASE + 0.6 * strength,
-    duration: 0.09, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
+    duration: 0.055, ease: 'power4.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(colorState, {
-    mix: 1, duration: 0.11, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
+    mix: 1, duration: 0.07, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   // Centre-orb recoil: a quick twist that ALWAYS settles back to dead level
   // (fromTo + yoyo ends at 0 — the logo can never drift off-angle).
   gsap.fromTo(logoGroup.rotation, { z: 0 }, {
     z: (Math.random() < 0.5 ? -1 : 1) * 0.045 * strength,
-    duration: 0.09, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: 'auto',
+    duration: 0.06, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(camera.position, {
-    z: '-=2.2', duration: 0.12, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: false,
+    z: '-=2.2', duration: 0.08, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: false,
   });
   director.onKick(strength);
 }
