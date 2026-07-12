@@ -569,7 +569,15 @@ function classifyKick(t) {
   if (interval > 0.3 && interval < 1.05) { // plausible 57-200 bpm spacing
     kickIntervals.push(interval);
     if (kickIntervals.length > 8) kickIntervals.shift();
-    if (kickIntervals.length >= 3) {
+    if (kickIntervals.length === 2) {
+      // Fast lock at set start: two agreeing intervals (3 kicks) are enough
+      // for a provisional tempo — the median below keeps refining it.
+      const [a, b] = kickIntervals;
+      if (Math.abs(a - b) < Math.min(a, b) * 0.15) {
+        beatPeriod = (a + b) / 2;
+        tempoConf = 1;
+      }
+    } else if (kickIntervals.length >= 3) {
       const sorted = [...kickIntervals].sort((a, b) => a - b);
       beatPeriod = sorted[sorted.length >> 1]; // median
       let within = 0;
@@ -592,7 +600,7 @@ function classifyKick(t) {
  * suspends the moment kicks drop out (breakdown) or energy dies (silence).
  */
 function updateBeatPredictor(t) {
-  if (!running || !beatPeriod || tempoConf < 0.6 || kickIntervals.length < 4) return;
+  if (!running || !beatPeriod || tempoConf < 0.6 || kickIntervals.length < 2) return;
   if (t - lastKick > beatPeriod * 4) return; // beat dropped out — stop predicting
   if (energyRaw < 0.08) return;              // near-silence
   if (nextBeatAt <= 0) nextBeatAt = lastStrongBeat + beatPeriod;
