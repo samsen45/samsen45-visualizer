@@ -457,7 +457,10 @@ function ensureContext() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;             // -> 256 frequency bins
-    analyser.smoothingTimeConstant = 0.8;
+    // Low smoothing so kick TRANSIENTS survive — at 0.8 the FFT is such a
+    // slow loudness meter that continuous music reads as one flat plateau
+    // and the beat detector goes blind. GSAP smooths the levels downstream.
+    analyser.smoothingTimeConstant = 0.55;
     freqData = new Uint8Array(analyser.frequencyBinCount);
     // Hz per bin = nyquist / binCount = sampleRate / fftSize (~86 Hz @ 44.1k/512).
     binHz = audioCtx.sampleRate / 2 / analyser.frequencyBinCount;
@@ -543,6 +546,7 @@ fileInput.addEventListener('change', (e) => {
  * 7. Kick detection — fast-attack envelope on the bass band -> "drop" reaction
  * ------------------------------------------------------------------------- */
 let bassBaseline = 0;
+let bassDev = 0.05; // running deviation -> adaptive beat threshold
 let lastKick = 0;
 const kickState = { pulse: 0 };  // 0..1, GSAP-driven flash amount
 const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
@@ -577,12 +581,19 @@ function onKick(strength) {
   director.onKick(strength);
 }
 
+/**
+ * Adaptive beat detection: a kick is a spike ABOVE the recent baseline, with
+ * the threshold scaled to the track's own bass variance — so it keeps firing
+ * per-beat during continuously loud passages instead of only on level jumps.
+ */
 function detectKick(rawBass, t) {
-  bassBaseline += (rawBass - bassBaseline) * 0.05;
+  bassBaseline += (rawBass - bassBaseline) * 0.06;
   const excess = rawBass - bassBaseline;
-  if (rawBass > 0.5 && excess > 0.11 && t - lastKick > 0.16) {
+  bassDev += (Math.abs(excess) - bassDev) * 0.05;
+  const threshold = Math.max(0.045, bassDev * 1.35);
+  if (rawBass > 0.18 && excess > threshold && t - lastKick > 0.18) {
     lastKick = t;
-    onKick(THREE.MathUtils.clamp(excess * 2.5, 0.3, 1));
+    onKick(THREE.MathUtils.clamp(excess / (threshold * 2.2), 0.35, 1));
   }
 }
 
@@ -752,6 +763,7 @@ window.addEventListener('resize', () => {
 const clock = new THREE.Clock();
 let spinAccum = 0;
 let flowAccum = 0;
+let turbTime = 0; // accumulated turbulence clock (rate varies with the beat)
 const bandVals = [0, 0, 0];
 
 function updateAudio(t) {
@@ -792,21 +804,26 @@ function updateFormation(dt, time) {
   const def = FORMATIONS[director.idx];
   const { bass, mids } = audio;
 
-  // Movement is BASS-driven: the low end swirls, thumps and shakes the field;
-  // mids only add a light shimmer on top (they must not steer the motion).
-  const angVel = def.spinSpeed * (0.05 + bass * 1.15 + swirlBoost) * dt;
+  // Movement is BEAT-driven: the per-kick pulse carries the show, and the
+  // bass LEVEL is only a floor — so continuous loud music still pumps
+  // visibly on every beat instead of parking at a bright plateau.
+  const pump = kickState.pulse;
+  const angVel = def.spinSpeed * (0.05 + bass * 0.45 + pump * 1.5 + swirlBoost) * dt;
   spinAccum += angVel;
   swirlBoost *= Math.pow(0.02, dt);
   if (def.flow) {
-    flowAccum += def.flow.speed * (0.3 + bass * 1.2 + kickState.pulse * 0.8) * dt;
+    flowAccum += def.flow.speed * (0.3 + bass * 0.5 + pump * 1.7) * dt;
   }
 
-  // Whole-formation radial THUMP on each kick (plus a breath with the bass).
-  const beatPunch = 1 + kickState.pulse * 0.16 + bass * 0.05;
+  // Whole-formation radial THUMP on each kick (plus a light breath with bass).
+  const beatPunch = 1 + pump * 0.2 + bass * 0.03;
 
   const turbAmp = def.turbAmp
-    * (0.35 + bass * 3.4 + kickState.pulse * 1.8 + mids * 0.7) * motion.ramp;
-  const tt = time * (0.4 + bass * 2.2) * def.turbFreq;
+    * (0.35 + bass * 1.3 + pump * 3.6 + mids * 0.5) * motion.ramp;
+  // Accumulated clock: the turbulence SPEEDS UP through each beat without
+  // the phase-warp a time*factor product would cause.
+  turbTime += dt * (0.4 + bass * 0.9 + pump * 1.6);
+  const tt = turbTime * def.turbFreq;
   const axisZ = def.spinAxis === 'z';
   const flowMin = def.flow ? def.flow.min : 0;
   const flowRange = def.flow ? def.flow.max - def.flow.min : 0;
@@ -846,7 +863,7 @@ function updateFormation(dt, time) {
 
   // Kick colour flash toward the style's contrast accent.
   particleMat.color.copy(WHITE).lerp(flashColor, colorState.mix * 0.85);
-  particleMat.size = PARTICLE_SIZE + bass * 0.22 + kickState.pulse * 0.12;
+  particleMat.size = PARTICLE_SIZE + bass * 0.1 + pump * 0.24;
 
   // Whole-system slow tumble for depth (skip for camera-axis styles).
   if (!axisZ) {
@@ -863,14 +880,14 @@ function updateCenterStack() {
   // Auto-iris: pull exposure down as energy rises so loud passages keep their
   // neon colour instead of saturating to white.
   renderer.toneMappingExposure = Math.max(1.05 - bass * 0.22 - mids * 0.1, 0.78);
-  // BIG bass action on the centre orb: the whole stack (logo + aura + halo)
-  // slams up on every kick and breathes hard with the low end. Legibility is
-  // safe — the dark outline + halo scale with it.
-  const s = 1 + bass * 0.6 + kickState.pulse * 0.65;
+  // The centre orb PUMPS PER BEAT: the kick pulse dominates its scale so it
+  // visibly slams on every kick even when the bass level sits at a plateau.
+  const pump = kickState.pulse;
+  const s = 1 + bass * 0.25 + pump * 0.9;
   logoGroup.scale.setScalar(s);
-  const gs = GLOW_BASE * (1 + bass * 0.55 + kickState.pulse * 0.9);
+  const gs = GLOW_BASE * (1 + bass * 0.3 + pump * 1.1);
   glow.scale.set(gs, gs, 1);
-  glowMat.opacity = 0.12 + bass * 0.28 + kickState.pulse * 0.3;
+  glowMat.opacity = 0.12 + bass * 0.15 + pump * 0.38;
   haloMat.opacity = Math.min(0.88 + bass * 0.12, 1);
   for (const key of ['pink', 'green']) {
     const pair = logos[key];
