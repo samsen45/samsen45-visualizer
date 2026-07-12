@@ -260,8 +260,12 @@ function commitTargets(def) {
 /* ---------------------------------------------------------------------------
  * 5. Centre stack — dark halo, glow aura, pink & green logos (auto-contrast)
  * ------------------------------------------------------------------------- */
+// In the SCENE root (not `world`): the world group slowly tumbles, and a
+// billboarded plane inside a rotating parent drifts edge-on and vanishes.
+// At the origin the tumble adds nothing — parenting to the scene keeps the
+// logo facing the camera permanently.
 const logoGroup = new THREE.Group();
-world.add(logoGroup);
+scene.add(logoGroup);
 
 // 5a. Dark halo disc: guarantees contrast behind the logo, always.
 const haloMat = new THREE.SpriteMaterial({
@@ -561,6 +565,12 @@ function onKick(strength) {
     overwrite: 'auto',
   });
   swirlBoost = Math.min(swirlBoost + 3.0 * strength, 6);
+  // Centre-orb recoil: a quick twist that ALWAYS settles back to dead level
+  // (fromTo + yoyo ends at 0 — the logo can never drift off-angle).
+  gsap.fromTo(logoGroup.rotation, { z: 0 }, {
+    z: (Math.random() < 0.5 ? -1 : 1) * 0.07 * strength,
+    duration: 0.09, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: 'auto',
+  });
   gsap.to(camera.position, {
     z: '-=2.2', duration: 0.12, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: false,
   });
@@ -707,7 +717,7 @@ window.addEventListener('keydown', (e) => {
 window.SAMSEN = {
   next: (i) => director.switch('manual', typeof i === 'number' ? i : null),
   skip: () => { if (morphTween) morphTween.progress(1); }, // jump-cut a morph
-  fx: { afterimage: afterimagePass, bloom: bloomPass },
+  fx: { afterimage: afterimagePass, bloom: bloomPass, world, logoGroup, kickState },
   styles: FORMATIONS.map((f) => f.name),
   audio, // exposed for live tuning / test simulation
   debug: () => ({
@@ -853,12 +863,14 @@ function updateCenterStack() {
   // Auto-iris: pull exposure down as energy rises so loud passages keep their
   // neon colour instead of saturating to white.
   renderer.toneMappingExposure = Math.max(1.05 - bass * 0.22 - mids * 0.1, 0.78);
-  // Bass pulse scales the whole stack; aura opacity/haloprotection breathe too.
-  const s = 1 + bass * 0.4 + kickState.pulse * 0.35;
+  // BIG bass action on the centre orb: the whole stack (logo + aura + halo)
+  // slams up on every kick and breathes hard with the low end. Legibility is
+  // safe — the dark outline + halo scale with it.
+  const s = 1 + bass * 0.6 + kickState.pulse * 0.65;
   logoGroup.scale.setScalar(s);
-  const gs = GLOW_BASE * (1 + bass * 0.3 + kickState.pulse * 0.35);
+  const gs = GLOW_BASE * (1 + bass * 0.55 + kickState.pulse * 0.9);
   glow.scale.set(gs, gs, 1);
-  glowMat.opacity = 0.12 + bass * 0.2 + kickState.pulse * 0.15;
+  glowMat.opacity = 0.12 + bass * 0.28 + kickState.pulse * 0.3;
   haloMat.opacity = Math.min(0.88 + bass * 0.12, 1);
   for (const key of ['pink', 'green']) {
     const pair = logos[key];
