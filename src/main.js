@@ -296,15 +296,50 @@ logoGroup.add(glow);
 
 // 5c. Two logo variants; the director crossfades to whichever CONTRASTS with
 // the style's centre hue (pink centre -> green logo, and vice versa).
-const logos = { pink: null, green: null }; // THREE.Mesh (or null if load failed)
+const logos = { pink: null, green: null }; // { mesh, back } (or null if load failed)
 let activeVariant = 'green';
+
+/**
+ * Bake a dark outline silhouette of the logo art (union of 12 offset stamps,
+ * filled void-dark). Rendered just behind the logo it guarantees stroke-level
+ * edge contrast on ANY background, however bright the particles get.
+ */
+function makeOutlineTexture(img) {
+  const m = Math.round(Math.max(img.width, img.height) * 0.03);
+  const cv = document.createElement('canvas');
+  cv.width = img.width + m * 2;
+  cv.height = img.height + m * 2;
+  const ctx = cv.getContext('2d');
+  for (let k = 0; k < 12; k++) {
+    const a = (k / 12) * Math.PI * 2;
+    ctx.drawImage(img, m + Math.cos(a) * m, m + Math.sin(a) * m);
+  }
+  ctx.globalCompositeOperation = 'source-in';
+  ctx.fillStyle = 'rgb(6,3,16)';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return { tex, growW: cv.width / img.width, growH: cv.height / img.height };
+}
 
 function makeLogoMesh(tex, initialOpacity) {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   const aspect = (tex.image && tex.image.width / tex.image.height) || 1;
   const h = 11;
-  const geo = new THREE.PlaneGeometry(h * aspect, h);
+
+  // Dark outline silhouette behind the artwork.
+  const o = makeOutlineTexture(tex.image);
+  const back = new THREE.Mesh(
+    new THREE.PlaneGeometry(h * aspect * o.growW, h * o.growH),
+    new THREE.MeshBasicMaterial({
+      map: o.tex, transparent: true, depthWrite: false, depthTest: false,
+      blending: THREE.NormalBlending, opacity: initialOpacity * 0.95, fog: false,
+    })
+  );
+  back.renderOrder = 19;
+  logoGroup.add(back);
+
   const mat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent: true,
@@ -314,10 +349,10 @@ function makeLogoMesh(tex, initialOpacity) {
     opacity: initialOpacity,
     fog: false,
   });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(h * aspect, h), mat);
   mesh.renderOrder = 20;
   logoGroup.add(mesh);
-  return mesh;
+  return { mesh, back };
 }
 
 const texLoader = new THREE.TextureLoader();
@@ -334,11 +369,15 @@ function setLogoVariant(variant) {
   activeVariant = variant;
   const show = logos[variant] || logos[variant === 'pink' ? 'green' : 'pink'];
   for (const key of ['pink', 'green']) {
-    const mesh = logos[key];
-    if (!mesh) continue;
-    gsap.to(mesh.material, { opacity: mesh === show ? 1 : 0, duration: 1.2, ease: 'power2.inOut', overwrite: 'auto' });
+    const pair = logos[key];
+    if (!pair) continue;
+    const on = pair === show;
+    gsap.to(pair.mesh.material, { opacity: on ? 1 : 0, duration: 1.2, ease: 'power2.inOut', overwrite: 'auto' });
+    gsap.to(pair.back.material, { opacity: on ? 0.95 : 0, duration: 1.2, ease: 'power2.inOut', overwrite: 'auto' });
   }
-  const accent = variant === 'pink' ? ACCENT_A : ACCENT_B;
+  // Aura tint = the FIELD's colour (opposite of the logo variant) so the logo
+  // contrasts with its own glow pocket instead of blending into it.
+  const accent = variant === 'pink' ? ACCENT_B : ACCENT_A;
   const tint = accent.clone().lerp(WHITE, 0.25);
   gsap.to(glowMat.color, { r: tint.r, g: tint.g, b: tint.b, duration: 1.2, overwrite: 'auto' });
 }
@@ -601,7 +640,9 @@ const director = {
     const variant = def.hue === 'pink' ? 'green' : 'pink';
     setLogoVariant(variant);
     setWord(idx, variant);
-    flashColor = (def.hue === 'pink' ? ACCENT_B : ACCENT_A).clone();
+    // Kick flash pushes the field toward its OWN hue — never the logo's colour,
+    // so beats can't blend the logo into the particles.
+    flashColor = (def.hue === 'pink' ? ACCENT_A : ACCENT_B).clone();
     this.caption(def.name);
     console.info(`[SAMSEN-45] style -> ${def.name} (${reason})`);
   },
@@ -651,8 +692,8 @@ function applyStyleInstant(idx) {
   const variant = def.hue === 'pink' ? 'green' : 'pink';
   activeVariant = variant;
   setWord(idx, variant);
-  flashColor = (def.hue === 'pink' ? ACCENT_B : ACCENT_A).clone();
-  glowMat.color.copy(variant === 'pink' ? ACCENT_A : ACCENT_B).lerp(WHITE, 0.25);
+  flashColor = (def.hue === 'pink' ? ACCENT_A : ACCENT_B).clone();
+  glowMat.color.copy(variant === 'pink' ? ACCENT_B : ACCENT_A).lerp(WHITE, 0.25);
 }
 
 // Manual override (VJ / testing): arrow key or window.SAMSEN.next()
@@ -797,7 +838,10 @@ function updateFormation(dt, time) {
 }
 
 function updateCenterStack() {
-  const { bass } = audio;
+  const { bass, mids } = audio;
+  // Auto-iris: pull exposure down as energy rises so loud passages keep their
+  // neon colour instead of saturating to white.
+  renderer.toneMappingExposure = Math.max(1.05 - bass * 0.22 - mids * 0.1, 0.78);
   // Bass pulse scales the whole stack; aura opacity/haloprotection breathe too.
   const s = 1 + bass * 0.4 + kickState.pulse * 0.35;
   logoGroup.scale.setScalar(s);
@@ -806,7 +850,10 @@ function updateCenterStack() {
   glowMat.opacity = 0.12 + bass * 0.2 + kickState.pulse * 0.15;
   haloMat.opacity = Math.min(0.88 + bass * 0.12, 1);
   for (const key of ['pink', 'green']) {
-    if (logos[key]) logos[key].quaternion.copy(camera.quaternion);
+    const pair = logos[key];
+    if (!pair) continue;
+    pair.mesh.quaternion.copy(camera.quaternion);
+    pair.back.quaternion.copy(camera.quaternion);
   }
 }
 
