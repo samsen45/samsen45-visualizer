@@ -84,7 +84,7 @@ const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
   0.7,  // strength (base — pulses on kicks)
   0.6,  // radius
-  0.18  // threshold (only bright cores bloom -> neon colour survives, no white-out)
+  0.22  // threshold (only bright cores bloom -> neon colour survives, no white-out)
 );
 const BLOOM_BASE = bloomPass.strength;
 composer.addPass(bloomPass);
@@ -113,7 +113,7 @@ function makeRadialSprite(inner = 'rgba(255,255,255,1)', outer = 'rgba(255,255,2
 const particleSprite = makeRadialSprite();
 const glowSprite = makeRadialSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)');
 // Dark contrast disc — the "do not blend the logo away" guarantee.
-const haloSprite = makeRadialSprite('rgba(10,5,27,0.96)', 'rgba(10,5,27,0)', 0.42);
+const haloSprite = makeRadialSprite('rgba(10,5,27,1)', 'rgba(10,5,27,0)', 0.52);
 
 /**
  * Load word art and convert "ink on white" to a white, tintable alpha mask:
@@ -216,7 +216,7 @@ function bakeTargets(def) {
     // Centre dimming: particles crossing the logo zone stay quiet so the
     // logo never blends in, whatever the formation does.
     const d = Math.sqrt(_out.x * _out.x + _out.y * _out.y + _out.z * _out.z);
-    const dim = Math.min(Math.max((d - 4) / 6, 0.22), 1) * _out.bright;
+    const dim = Math.min(Math.max((d - 5) / 7, 0.12), 1) * _out.bright;
 
     _c.copy(ACCENT_A).lerp(ACCENT_B, _out.t).multiplyScalar(dim);
     targetCol[i3] = _c.r;
@@ -273,7 +273,7 @@ const haloMat = new THREE.SpriteMaterial({
   fog: false,
 });
 const halo = new THREE.Sprite(haloMat);
-halo.scale.set(30, 30, 1);
+halo.scale.set(34, 34, 1);
 halo.renderOrder = 14;
 logoGroup.add(halo);
 
@@ -508,7 +508,7 @@ let swirlBoost = 0;
 
 function onKick(strength) {
   gsap.to(bloomPass, {
-    strength: BLOOM_BASE + 1.6 * strength,
+    strength: BLOOM_BASE + 0.8 * strength,
     duration: 0.09, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(colorState, {
@@ -534,19 +534,23 @@ function detectKick(rawBass, t) {
 }
 
 /* ---------------------------------------------------------------------------
- * 8. Style director — hybrid auto-switching between the 16 formations
- *    Triggers: new-song (>=2s silence then sound), big drops after 20s dwell,
- *    60s fallback. Transitions are 1.65s particle morphs.
+ * 8. Style director — auto-switching between the 16 formations
+ *    Primary trigger: every 4 bars of beats (16 detected kicks in 4/4).
+ *    Also: new-song (>=2s silence then sound) and a 60s no-beat fallback.
+ *    Transitions are 1.65s particle morphs.
  * ------------------------------------------------------------------------- */
 const morph = { active: false, mix: 0 };
 const motion = { ramp: 1 }; // turbulence ramps back in after each morph
 let morphTween = null;     // kept so tests/VJs can jump-cut (SAMSEN.skip)
+
+const BEATS_PER_SWITCH = 16; // 4 bars of 4/4
 
 const director = {
   idx: 0,
   bag: [],
   lastSwitch: 0,
   silentFor: 0,
+  beats: 0,
   captionTimer: null,
 
   next() {
@@ -562,9 +566,13 @@ const director = {
 
   dwell(t) { return t - this.lastSwitch; },
 
-  onKick(strength) {
+  onKick() {
     if (!running || morph.active) return;
-    if (strength > 0.55 && this.dwell(clock.elapsedTime) > 20) this.switch('drop');
+    // Count beats; a new style every 4 bars keeps the show phrased to the music.
+    this.beats++;
+    if (this.beats >= BEATS_PER_SWITCH && this.dwell(clock.elapsedTime) > 4) {
+      this.switch('4-bars');
+    }
   },
 
   update(dt, t) {
@@ -576,7 +584,7 @@ const director = {
       if (this.silentFor >= 2 && this.dwell(t) > 6) this.switch('song');
       this.silentFor = 0;
     }
-    // Fallback: never let one style overstay.
+    // Fallback for beat-less material: never let one style overstay.
     if (this.dwell(t) > 60) this.switch('timer');
   },
 
@@ -587,6 +595,7 @@ const director = {
     this.idx = idx;
     this.lastSwitch = clock.elapsedTime;
     this.silentFor = 0;
+    this.beats = 0;
     startMorph(def);
     // Branding reacts: contrasting logo variant + next theme word.
     const variant = def.hue === 'pink' ? 'green' : 'pink';
@@ -623,7 +632,7 @@ function startMorph(def) {
   gsap.to(particles.rotation, { x: def.tiltX, z: def.tiltZ, duration: 1.65, ease: 'power2.inOut', overwrite: 'auto' });
   if (running) gsap.to(camera.position, { z: def.camZ, duration: 2, ease: 'power2.inOut', overwrite: 'auto' });
   gsap.to(bloomPass, {
-    strength: BLOOM_BASE + 0.9, duration: 0.82, ease: 'power2.in',
+    strength: BLOOM_BASE + 0.55, duration: 0.82, ease: 'power2.in',
     yoyo: true, repeat: 1, overwrite: 'auto',
   });
 }
@@ -655,9 +664,11 @@ window.SAMSEN = {
   skip: () => { if (morphTween) morphTween.progress(1); }, // jump-cut a morph
   fx: { afterimage: afterimagePass, bloom: bloomPass },
   styles: FORMATIONS.map((f) => f.name),
+  audio, // exposed for live tuning / test simulation
   debug: () => ({
     active: morph.active, mix: +morph.mix.toFixed(3), ramp: +motion.ramp.toFixed(3),
-    idx: director.idx, t: +clock.elapsedTime.toFixed(1), gsapTime: +gsap.ticker.time.toFixed(1),
+    idx: director.idx, beats: director.beats,
+    t: +clock.elapsedTime.toFixed(1), gsapTime: +gsap.ticker.time.toFixed(1),
   }),
 };
 
@@ -773,7 +784,7 @@ function updateFormation(dt, time) {
 
   // Kick colour flash toward the style's contrast accent.
   particleMat.color.copy(WHITE).lerp(flashColor, colorState.mix * 0.85);
-  particleMat.size = PARTICLE_SIZE + bass * 0.5 + kickState.pulse * 0.3;
+  particleMat.size = PARTICLE_SIZE + bass * 0.22 + kickState.pulse * 0.12;
 
   // Whole-system slow tumble for depth (skip for camera-axis styles).
   if (!axisZ) {
@@ -790,10 +801,10 @@ function updateCenterStack() {
   // Bass pulse scales the whole stack; aura opacity/haloprotection breathe too.
   const s = 1 + bass * 0.4 + kickState.pulse * 0.35;
   logoGroup.scale.setScalar(s);
-  const gs = GLOW_BASE * (1 + bass * 0.55 + kickState.pulse * 0.7);
+  const gs = GLOW_BASE * (1 + bass * 0.3 + kickState.pulse * 0.35);
   glow.scale.set(gs, gs, 1);
-  glowMat.opacity = 0.16 + bass * 0.45 + kickState.pulse * 0.4;
-  haloMat.opacity = 0.78 + bass * 0.14;
+  glowMat.opacity = 0.12 + bass * 0.2 + kickState.pulse * 0.15;
+  haloMat.opacity = Math.min(0.88 + bass * 0.12, 1);
   for (const key of ['pink', 'green']) {
     if (logos[key]) logos[key].quaternion.copy(camera.quaternion);
   }
@@ -844,4 +855,4 @@ applyStyleInstant(0);
 applyResize();
 tick();
 console.info('[SAMSEN-45] 16 styles loaded:', window.SAMSEN.styles.join(' · '),
-  '\nAuto-switching: new-song / big-drop / 60s. Manual: ArrowRight or SAMSEN.next(i).');
+  '\nAuto-switching: every 4 bars of beats / new-song / 60s fallback. Manual: ArrowRight or SAMSEN.next(i).');
