@@ -548,6 +548,8 @@ fileInput.addEventListener('change', (e) => {
  * ------------------------------------------------------------------------- */
 let bassBaseline = 0;
 let bassDev = 0.05; // running deviation -> adaptive beat threshold
+let bassPeak = 0;   // rolling bass peak — "has REAL bass happened recently?"
+let quietFor = 0;   // seconds of near-silence -> drops the tempo lock
 let lastKick = 0;
 const kickState = { pulse: 0 };  // field motion pulse — every detected kick
 const orbState = { pulse: 0 };   // orb/bloom FLASH — tempo-locked beats only
@@ -601,8 +603,10 @@ function classifyKick(t) {
  */
 function updateBeatPredictor(t) {
   if (!running || !beatPeriod || tempoConf < 0.6 || kickIntervals.length < 2) return;
-  if (t - lastKick > beatPeriod * 4) return; // beat dropped out — stop predicting
-  if (energyRaw < 0.08) return;              // near-silence
+  if (t - lastKick > beatPeriod * 4) return;       // beat dropped out
+  if (t - lastStrongBeat > beatPeriod * 3) return; // no ON-GRID kicks lately
+  if (energyRaw < 0.08) return;                    // near-silence
+  if (bassPeak < 0.28) return; // no real bass recently -> ambience can't strobe
   if (nextBeatAt <= 0) nextBeatAt = lastStrongBeat + beatPeriod;
   if (t >= nextBeatAt) {
     if (t - nextBeatAt < 0.08) fireBeat(avgKickStrength * 0.9, t); // on time only
@@ -671,12 +675,31 @@ function fireBeat(strength, t) {
  * the threshold scaled to the track's own bass variance — so it keeps firing
  * per-beat during continuously loud passages instead of only on level jumps.
  */
-function detectKick(rawBass, t) {
+function detectKick(rawBass, t, dt) {
   bassBaseline += (rawBass - bassBaseline) * 0.06;
   const excess = rawBass - bassBaseline;
   bassDev += (Math.abs(excess) - bassDev) * 0.05;
+  bassPeak = Math.max(bassPeak * (1 - 0.25 * dt), rawBass); // decays 25%/s
+
+  // Sustained near-silence -> the song is over; drop the tempo lock so
+  // ambience can't ride an old grid, and re-lock fresh on the next track.
+  if (energyRaw < 0.05) {
+    quietFor += dt;
+    if (quietFor > 1.5 && beatPeriod) {
+      kickIntervals.length = 0;
+      beatPeriod = 0;
+      tempoConf = 0;
+      nextBeatAt = 0;
+    }
+  } else {
+    quietFor = 0;
+  }
+
   const threshold = Math.max(0.045, bassDev * 1.35);
-  if (rawBass > 0.18 && excess > threshold && t - lastKick > 0.18) {
+  // A kick must be loud in absolute terms AND stand up to the recent real
+  // bass level — room rumble after the music stops fails both comparisons.
+  if (rawBass > 0.18 && bassPeak > 0.28 && rawBass > bassPeak * 0.55
+      && excess > threshold && t - lastKick > 0.18) {
     const onBeat = classifyKick(t);
     lastKick = t;
     onKick(THREE.MathUtils.clamp(excess / (threshold * 2.2), 0.35, 1), onBeat);
@@ -852,7 +875,7 @@ let flowAccum = 0;
 let turbTime = 0; // accumulated turbulence clock (rate varies with the beat)
 const bandVals = [0, 0, 0];
 
-function updateAudio(t) {
+function updateAudio(t, dt) {
   if (!running || !analyser) return;
   analyser.getByteFrequencyData(freqData);
   const rawBass = bandAvg(0, 150);
@@ -862,7 +885,7 @@ function updateAudio(t) {
   setBass(rawBass);
   setMids(rawMids);
   setHighs(rawHighs);
-  detectKick(rawBass, t);
+  detectKick(rawBass, t, dt);
 }
 
 function updateMorph() {
@@ -1013,7 +1036,7 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
 
-  updateAudio(time);
+  updateAudio(time, dt);
   updateBeatPredictor(time);
   director.update(dt, time);
   if (morph.active) updateMorph();
