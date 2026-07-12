@@ -26,18 +26,17 @@ const ACCENT_B = new THREE.Color('#66ff33'); // electric neon green
 const WHITE = new THREE.Color('#ffffff');
 
 const PARTICLE_COUNT = 40000;
-const LOGO_PINK_URL = '/resource/logo.png';
-const LOGO_GREEN_URL = '/resource/logo-green.png';
+// Base-aware asset paths: BASE_URL is '/' in dev and './' in the production
+// build (vite base './'), so these resolve correctly on a GitHub Pages
+// subpath (/repo/) as well as a domain root. Absolute '/resource/...' paths
+// 404 on Pages — the site does not live at the domain root there.
+const RES = import.meta.env.BASE_URL;
+const LOGO_PINK_URL = RES + 'resource/logo.png';
+const LOGO_GREEN_URL = RES + 'resource/logo-green.png';
 const WORD_URLS = [
-  '/resource/words/reboot.png',
-  '/resource/words/reunite.png',
-  '/resource/words/restart.png',
-  '/resource/words/volution.png',
-  '/resource/words/reintroduce.png',
-  '/resource/words/redo.png',
-  '/resource/words/unite.png',
-  '/resource/words/cycle.png',
-];
+  'reboot', 'reunite', 'restart', 'volution',
+  'reintroduce', 'redo', 'unite', 'cycle',
+].map((w) => `${RES}resource/words/${w}.png`);
 
 /* ---------------------------------------------------------------------------
  * 1. Renderer / scene / camera
