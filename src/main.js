@@ -548,19 +548,37 @@ fileInput.addEventListener('change', (e) => {
 let bassBaseline = 0;
 let bassDev = 0.05; // running deviation -> adaptive beat threshold
 let lastKick = 0;
-const kickState = { pulse: 0 };  // 0..1, GSAP-driven flash amount
+const kickState = { pulse: 0 };  // field motion pulse — every detected kick
+const orbState = { pulse: 0 };   // orb/bloom FLASH — tempo-locked beats only
 const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
+
+// Tempo lock: estimate the beat period from kick intervals, and only let
+// detections ON the tempo grid fire the big flashes — stray bassline hits
+// between beats move the field but never strobe the logo.
+const kickIntervals = [];
+let beatPeriod = 0;   // seconds per beat (0 = not locked yet)
+let lastStrongBeat = -10;
+
+function classifyKick(t) {
+  const interval = t - lastKick;
+  if (interval > 0.3 && interval < 1.05) { // plausible 57-200 bpm spacing
+    kickIntervals.push(interval);
+    if (kickIntervals.length > 8) kickIntervals.shift();
+    if (kickIntervals.length >= 3) {
+      const sorted = [...kickIntervals].sort((a, b) => a - b);
+      beatPeriod = sorted[sorted.length >> 1]; // median
+    }
+  }
+  if (!beatPeriod) return true; // no lock yet -> treat as on-beat
+  const phase = (t - lastStrongBeat) / beatPeriod;
+  const nearest = Math.round(phase);
+  return nearest >= 1 && Math.abs(phase - nearest) < 0.18;
+}
 let flashColor = ACCENT_B.clone(); // per style: the accent OPPOSITE its centre
 let swirlBoost = 0;
 
-function onKick(strength) {
-  gsap.to(bloomPass, {
-    strength: BLOOM_BASE + 0.8 * strength,
-    duration: 0.09, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
-  });
-  gsap.to(colorState, {
-    mix: 1, duration: 0.11, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
-  });
+function onKick(strength, onBeat) {
+  // Field motion reacts to every detected kick (musical energy)…
   gsap.to(kickState, {
     keyframes: [
       { pulse: 1, duration: 0.06, ease: 'power3.out' },  // hit
@@ -569,10 +587,29 @@ function onKick(strength) {
     overwrite: 'auto',
   });
   swirlBoost = Math.min(swirlBoost + 3.0 * strength, 6);
+
+  // …but the FLASHES (orb, bloom, colour, recoil, dolly) fire only on the
+  // tempo grid, so the logo pulses in time instead of strobing at random.
+  if (!onBeat) return;
+  lastStrongBeat = clock.elapsedTime;
+  gsap.to(orbState, {
+    keyframes: [
+      { pulse: 1, duration: 0.06, ease: 'power3.out' },
+      { pulse: 0, duration: 0.32, ease: 'power2.out' },
+    ],
+    overwrite: 'auto',
+  });
+  gsap.to(bloomPass, {
+    strength: BLOOM_BASE + 0.6 * strength,
+    duration: 0.09, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: 'auto',
+  });
+  gsap.to(colorState, {
+    mix: 1, duration: 0.11, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
+  });
   // Centre-orb recoil: a quick twist that ALWAYS settles back to dead level
   // (fromTo + yoyo ends at 0 — the logo can never drift off-angle).
   gsap.fromTo(logoGroup.rotation, { z: 0 }, {
-    z: (Math.random() < 0.5 ? -1 : 1) * 0.07 * strength,
+    z: (Math.random() < 0.5 ? -1 : 1) * 0.045 * strength,
     duration: 0.09, ease: 'power2.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(camera.position, {
@@ -592,8 +629,9 @@ function detectKick(rawBass, t) {
   bassDev += (Math.abs(excess) - bassDev) * 0.05;
   const threshold = Math.max(0.045, bassDev * 1.35);
   if (rawBass > 0.18 && excess > threshold && t - lastKick > 0.18) {
+    const onBeat = classifyKick(t);
     lastKick = t;
-    onKick(THREE.MathUtils.clamp(excess / (threshold * 2.2), 0.35, 1));
+    onKick(THREE.MathUtils.clamp(excess / (threshold * 2.2), 0.35, 1), onBeat);
   }
 }
 
@@ -728,7 +766,7 @@ window.addEventListener('keydown', (e) => {
 window.SAMSEN = {
   next: (i) => director.switch('manual', typeof i === 'number' ? i : null),
   skip: () => { if (morphTween) morphTween.progress(1); }, // jump-cut a morph
-  fx: { afterimage: afterimagePass, bloom: bloomPass, world, logoGroup, kickState },
+  fx: { afterimage: afterimagePass, bloom: bloomPass, world, logoGroup, kickState, orbState },
   styles: FORMATIONS.map((f) => f.name),
   audio, // exposed for live tuning / test simulation
   debug: () => ({
@@ -880,14 +918,14 @@ function updateCenterStack() {
   // Auto-iris: pull exposure down as energy rises so loud passages keep their
   // neon colour instead of saturating to white.
   renderer.toneMappingExposure = Math.max(1.05 - bass * 0.22 - mids * 0.1, 0.78);
-  // The centre orb PUMPS PER BEAT: the kick pulse dominates its scale so it
-  // visibly slams on every kick even when the bass level sits at a plateau.
-  const pump = kickState.pulse;
-  const s = 1 + bass * 0.25 + pump * 0.9;
+  // The centre orb pulses on TEMPO-LOCKED beats only (orbState), with
+  // restrained gains — in time with the music, never a random strobe.
+  const pump = orbState.pulse;
+  const s = 1 + bass * 0.2 + pump * 0.45;
   logoGroup.scale.setScalar(s);
-  const gs = GLOW_BASE * (1 + bass * 0.3 + pump * 1.1);
+  const gs = GLOW_BASE * (1 + bass * 0.25 + pump * 0.55);
   glow.scale.set(gs, gs, 1);
-  glowMat.opacity = 0.12 + bass * 0.15 + pump * 0.38;
+  glowMat.opacity = 0.12 + bass * 0.12 + pump * 0.2;
   haloMat.opacity = Math.min(0.88 + bass * 0.12, 1);
   for (const key of ['pink', 'green']) {
     const pair = logos[key];
