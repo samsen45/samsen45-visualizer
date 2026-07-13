@@ -450,6 +450,10 @@ const setBass = gsap.quickTo(audio, 'bass', { duration: 0.09, ease: 'power2.out'
 const setMids = gsap.quickTo(audio, 'mids', { duration: 0.14, ease: 'power2.out' });
 const setHighs = gsap.quickTo(audio, 'highs', { duration: 0.1, ease: 'power2.out' });
 let energyRaw = 0; // instantaneous, for song-change detection
+// Duty cycle of broadband energy over ~1.2s: music holds ~1 (pads/hats fill
+// the gaps between kicks); speech and ambient thuds are bursty and stay low.
+// This is the "is music actually playing?" signal that gates all flashing.
+let musicActivity = 0;
 
 function ensureContext() {
   if (!audioCtx) {
@@ -640,6 +644,10 @@ function onKick(strength, onBeat) {
  *  Reached from BOTH real detections and the predictor; the gap guard makes
  *  sure one beat slot only ever flashes once. */
 function fireBeat(strength, t) {
+  // Flashing requires actual MUSIC — sustained broadband energy. Speech,
+  // thuds and room ambience are bursty and never reach this duty cycle,
+  // so they can trigger nothing here no matter how bass-heavy they are.
+  if (musicActivity < 0.65) return;
   const minGap = beatPeriod ? beatPeriod * 0.45 : 0.2;
   if (t - lastFlashAt < minGap) return;
   lastFlashAt = t;
@@ -881,6 +889,7 @@ function updateAudio(t, dt) {
   const rawMids = bandAvg(150, 2000);
   const rawHighs = bandAvg(2000, binHz * freqData.length);
   energyRaw = (rawBass + rawMids + rawHighs) / 3;
+  musicActivity += ((energyRaw > 0.1 ? 1 : 0) - musicActivity) * Math.min(dt / 1.2, 1);
   setBass(rawBass);
   setMids(rawMids);
   setHighs(rawHighs);
