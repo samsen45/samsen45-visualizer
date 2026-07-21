@@ -16,6 +16,9 @@
  *   turbFreq  turbulence frequency multiplier
  *   flow      null | { speed, min, max } — particle stream along spinAxis
  *   eq        true → bar heights driven per-band (aux packs band+heightFrac)
+ *   sizeScale optional >1 — multiplies particle size for SPARSE formations
+ *             (thin spiral / column / outline) whose dots read too small once a
+ *             wide screen surrounds them with empty space. Absent → 1 (unchanged).
  *   generate(i, N, o, r1, r2, r3) — fill `o` for particle i.
  *       o.x/y/z  rest position
  *       o.t      0 = pink … 1 = green (palette mix)
@@ -79,6 +82,7 @@ export const FORMATIONS = [
   {
     name: 'Double Helix', hue: 'pink', camZ: 52, tiltX: 0, tiltZ: 0.16,
     spinAxis: 'y', spinSpeed: 0.8, turbAmp: 0.7, turbFreq: 1, flow: null, eq: false,
+    sizeScale: 1.7,
     generate(i, N, o, r1, r2, r3) {
       const s = i % 2;
       const f = i / N;
@@ -268,6 +272,7 @@ export const FORMATIONS = [
   {
     name: 'Phoenix Wings', hue: 'pink', camZ: 44, tiltX: 0, tiltZ: 0,
     spinAxis: 'y', spinSpeed: 0.25, turbAmp: 1.1, turbFreq: 1, flow: null, eq: false,
+    sizeScale: 1.55,
     generate(i, N, o, r1, r2, r3) {
       const th = r1 * TAU * 2;
       const r = Math.exp(Math.sin(th)) - 2 * Math.cos(4 * th)
@@ -284,7 +289,7 @@ export const FORMATIONS = [
   {
     name: 'Geyser', hue: 'pink', camZ: 50, tiltX: 0, tiltZ: 0,
     spinAxis: 'y', spinSpeed: 0.6, turbAmp: 1.2, turbFreq: 1.1,
-    flow: { speed: 12, min: -14, max: 16 }, eq: false,
+    flow: { speed: 12, min: -14, max: 16 }, eq: false, sizeScale: 1.6,
     generate(i, N, o, r1, r2, r3) {
       const f = r1;
       const R = 1.2 + Math.pow(f, 2.2) * 14 + (r2 - 0.5) * 2;

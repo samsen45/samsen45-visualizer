@@ -189,6 +189,10 @@ particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 particleGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
 const PARTICLE_SIZE = 0.34;
+// Sparse formations (Double Helix / Geyser / Phoenix) carry an optional
+// `sizeScale`; the applied factor eases toward it through morphs so dots don't
+// pop-resize on a style switch. See formations.js contract.
+let particleSizeScale = 1;
 const particleMat = new THREE.PointsMaterial({
   size: PARTICLE_SIZE,
   map: particleSprite,
@@ -569,7 +573,8 @@ const kickState = { pulse: 0 };  // field motion pulse — every detected kick
 const orbState = { pulse: 0 };   // orb/bloom FLASH — tempo-locked beats only
 const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
 
-let lastStrongBeat = -10;
+let lastStrongBeat = -10;   // phase anchor for the grid — set by on-grid detections AND predictions
+let lastDetectedKick = -10; // liveness only — ANY raw onset, on- or off-grid
 let nextBeatAt = 0;   // predicted time of the next beat (predictive flashing)
 let avgKickStrength = 0.6;
 let lastFlashAt = -10;
@@ -591,12 +596,20 @@ function classifyOnGrid(t, beatPeriod) {
 function updateBeatPredictor(t) {
   if (!running || !beatEngine || !beatEngine.bpm || !beatEngine.bpmStable) return;
   const beatPeriod = 60 / beatEngine.bpm;
-  if (t - lastStrongBeat > beatPeriod * 3) return; // no ON-GRID kicks lately
+  // Liveness uses ANY raw onset, not just on-grid ones: a live mic reliably
+  // MISSES the odd on-grid kick but still emits onsets throughout the music, so
+  // gating on on-grid detections alone stalled the grid. Real breakdowns stop
+  // ALL onsets (and drop the energy/bass below their floors) — that's what quiets it.
+  if (t - lastDetectedKick > beatPeriod * 4) return;
   if (energyRaw < 0.08) return;                    // near-silence
   if (audio.bass < 0.12) return; // no real bass recently -> ambience can't strobe
-  if (nextBeatAt <= 0) nextBeatAt = lastStrongBeat + beatPeriod;
+  if (nextBeatAt <= 0) nextBeatAt = (lastStrongBeat > 0 ? lastStrongBeat : t) + beatPeriod;
   if (t >= nextBeatAt) {
-    if (t - nextBeatAt < 0.08) fireBeat(avgKickStrength * 0.9, t); // on time only
+    if (t - nextBeatAt < 0.08) {
+      fireBeat(avgKickStrength * 0.9, t); // on time only
+      lastStrongBeat = t; // predictions keep the phase anchor fresh so the grid
+                          // self-sustains; on-grid detections still re-anchor to the drum
+    }
     while (nextBeatAt <= t) nextBeatAt += beatPeriod; // advance, never burst
   }
 }
@@ -605,6 +618,7 @@ let swirlBoost = 0;
 
 function onKick(strength, onBeat, beatPeriod) {
   const t = clock.elapsedTime;
+  lastDetectedKick = t; // any onset (on- or off-grid) proves the music's still running
   // Field motion reacts to every detected kick (musical energy)…
   gsap.to(kickState, {
     keyframes: [
@@ -813,6 +827,8 @@ window.SAMSEN = {
     get spectralCentroid() { return beatEngine ? beatEngine.spectralCentroid : 0; },
     get bpm() { return beatEngine ? beatEngine.bpm : 0; },
     get bpmStable() { return beatEngine ? beatEngine.bpmStable : false; },
+    get _diag() { return beatEngine ? beatEngine._diag : null; }, // onset detector tuning: instant/threshold/rollingAvg + fire count
+    traceSummary: () => (beatEngine ? beatEngine.getTraceSummary() : null), // which band actually carries kick-synced modulation
   },
   debug: () => ({
     active: morph.active, mix: +morph.mix.toFixed(3), ramp: +motion.ramp.toFixed(3),
@@ -822,6 +838,9 @@ window.SAMSEN = {
     bpmStable: beatEngine ? beatEngine.bpmStable : false,
     intensity: beatEngine ? +beatEngine.intensity.toFixed(3) : 0,
     spectralCentroid: beatEngine ? +beatEngine.spectralCentroid.toFixed(3) : 0,
+    musicActivity: +musicActivity.toFixed(3), // gates fireBeat at >= 0.65
+    energyRaw: +energyRaw.toFixed(3),
+    diag: beatEngine ? beatEngine._diag : null, // onset detector tuning
   }),
 };
 
@@ -951,7 +970,11 @@ function updateFormation(dt, time) {
 
   // Kick colour flash toward the style's contrast accent.
   particleMat.color.copy(WHITE).lerp(flashColor, colorState.mix * 0.85);
-  particleMat.size = PARTICLE_SIZE + bass * 0.1 + pump * 0.24;
+  // Sparse styles enlarge their dots (eased through the morph) so they read on
+  // a wide screen; dense galaxy styles stay at 1.
+  const targetSizeScale = FORMATIONS[director.idx].sizeScale || 1;
+  particleSizeScale += (targetSizeScale - particleSizeScale) * Math.min(dt * 3, 1);
+  particleMat.size = (PARTICLE_SIZE + bass * 0.1 + pump * 0.24) * particleSizeScale;
 
   // Whole-system slow tumble for depth (skip for camera-axis styles).
   if (!axisZ) {
