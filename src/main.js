@@ -44,7 +44,7 @@ const LOGO_GREEN_URL = RES + 'resource/logo-green.png';
 const WORD_LIST = [
   'REBOOT', 'REUNITE', 'RESTART', 'REVOLUTION',
   'REBIRTH', 'RESONATE', 'REWIRE', 'RENEW',
-  'RECYCLE', 'AWAKEN', 'PULSE', 'INFINITE',
+  'RECYCLE', 'AWAKEN', 'PULSE', 'INFINITE', 'DJ MELLOW',
 ];
 
 /* ---------------------------------------------------------------------------
