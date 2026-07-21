@@ -20,6 +20,10 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { gsap } from 'gsap';
 import { FORMATIONS } from './formations.js';
 import { createAudioAnalysis } from './audioAnalysis.js';
+import '@fontsource/orbitron/900.css'; // self-hosted (no CDN) — futuristic display face for the word satellite
+
+const WORD_FONT_SIZE = 160;
+const WORD_FONT = `900 ${WORD_FONT_SIZE}px "Orbitron", Impact, "Arial Black", sans-serif`;
 
 /* ---------------------------------------------------------------------------
  * 0. Theme constants (mirrors styles.css)
@@ -126,17 +130,15 @@ const haloSprite = makeRadialSprite('rgba(10,5,27,1)', 'rgba(10,5,27,0)', 0.52);
  * is plain text instead of external word-art image assets.
  */
 function makeTextTexture(text) {
-  const fontSize = 160;
-  const font = `900 ${fontSize}px Impact, "Arial Black", Arial, sans-serif`;
   const measureCtx = document.createElement('canvas').getContext('2d');
-  measureCtx.font = font;
-  const padX = fontSize * 0.3;
+  measureCtx.font = WORD_FONT;
+  const padX = WORD_FONT_SIZE * 0.3;
   const width = Math.ceil(measureCtx.measureText(text).width) + padX * 2;
-  const height = Math.ceil(fontSize * 1.35);
+  const height = Math.ceil(WORD_FONT_SIZE * 1.35);
   const cv = document.createElement('canvas');
   cv.width = width; cv.height = height;
   const ctx = cv.getContext('2d');
-  ctx.font = font;
+  ctx.font = WORD_FONT;
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -387,7 +389,15 @@ function setLogoVariant(variant) {
 }
 
 /* 5d. Theme-word satellite (REBOOT / REUNITE / ... orbiting outside the logo zone) */
-const wordTextures = WORD_LIST.map((w) => makeTextTexture(w));
+const wordTextures = new Array(WORD_LIST.length).fill(null);
+// Draw with the system fallback immediately (never block boot on a font fetch),
+// then redraw in Orbitron once it's actually loaded — @font-face fonts pulled in
+// via CSS import aren't fetched until something requests them.
+WORD_LIST.forEach((w, k) => { wordTextures[k] = makeTextTexture(w); });
+document.fonts.load(WORD_FONT).then(() => document.fonts.ready).then(() => {
+  WORD_LIST.forEach((w, k) => { wordTextures[k] = makeTextTexture(w); });
+  setWord(director.idx, activeVariant); // refresh the currently-shown word onto the new glyphs
+});
 
 const wordMat = new THREE.SpriteMaterial({
   transparent: true,
