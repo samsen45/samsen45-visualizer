@@ -37,10 +37,11 @@ const PARTICLE_COUNT = 40000;
 const RES = import.meta.env.BASE_URL;
 const LOGO_PINK_URL = RES + 'resource/logo.png';
 const LOGO_GREEN_URL = RES + 'resource/logo-green.png';
-const WORD_URLS = [
-  'reboot', 'reunite', 'restart', 'volution',
-  'reintroduce', 'redo', 'unite', 'cycle',
-].map((w) => `${RES}resource/words/${w}.png`);
+const WORD_LIST = [
+  'REBOOT', 'REUNITE', 'RESTART', 'REVOLUTION',
+  'REBIRTH', 'RESONATE', 'REWIRE', 'RENEW',
+  'RECYCLE', 'AWAKEN', 'PULSE', 'INFINITE',
+];
 
 /* ---------------------------------------------------------------------------
  * 1. Renderer / scene / camera
@@ -119,35 +120,31 @@ const glowSprite = makeRadialSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0
 const haloSprite = makeRadialSprite('rgba(10,5,27,1)', 'rgba(10,5,27,0)', 0.52);
 
 /**
- * Load word art and convert "ink on white" to a white, tintable alpha mask:
- * dark pixels -> opaque white, white/transparent pixels -> transparent.
- * Works whether the source PNG has a transparent or opaque background.
+ * Render a word as a white, tintable alpha-mask texture (opaque glyphs on a
+ * transparent canvas) — same contract loadInkTexture used to produce from a
+ * PNG, but drawn straight from a string so the orbiting satellite word list
+ * is plain text instead of external word-art image assets.
  */
-function loadInkTexture(url) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const cv = document.createElement('canvas');
-      cv.width = img.width; cv.height = img.height;
-      const ctx = cv.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, cv.width, cv.height);
-      const px = data.data;
-      for (let p = 0; p < px.length; p += 4) {
-        const lum = (px[p] * 0.299 + px[p + 1] * 0.587 + px[p + 2] * 0.114) / 255;
-        const ink = (1 - lum) * (px[p + 3] / 255);
-        px[p] = px[p + 1] = px[p + 2] = 255;
-        px[p + 3] = Math.round(ink * 255);
-      }
-      ctx.putImageData(data, 0, 0);
-      const tex = new THREE.CanvasTexture(cv);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.userData.aspect = img.width / img.height;
-      resolve(tex);
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
+function makeTextTexture(text) {
+  const fontSize = 160;
+  const font = `900 ${fontSize}px Impact, "Arial Black", Arial, sans-serif`;
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  measureCtx.font = font;
+  const padX = fontSize * 0.3;
+  const width = Math.ceil(measureCtx.measureText(text).width) + padX * 2;
+  const height = Math.ceil(fontSize * 1.35);
+  const cv = document.createElement('canvas');
+  cv.width = width; cv.height = height;
+  const ctx = cv.getContext('2d');
+  ctx.font = font;
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, width / 2, height / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.userData.aspect = width / height;
+  return tex;
 }
 
 /* ---------------------------------------------------------------------------
@@ -390,14 +387,7 @@ function setLogoVariant(variant) {
 }
 
 /* 5d. Theme-word satellite (REBOOT / REUNITE / ... orbiting outside the logo zone) */
-const wordTextures = new Array(WORD_URLS.length).fill(null);
-WORD_URLS.forEach((url, k) => loadInkTexture(url).then((t) => {
-  wordTextures[k] = t;
-  // If this word belongs to the style currently on stage, (re)show it.
-  if (t && !wordSprite.visible && director.idx % wordTextures.length === k) {
-    setWord(director.idx, activeVariant);
-  }
-}));
+const wordTextures = WORD_LIST.map((w) => makeTextTexture(w));
 
 const wordMat = new THREE.SpriteMaterial({
   transparent: true,
