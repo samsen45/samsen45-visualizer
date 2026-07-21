@@ -6,6 +6,9 @@
  *            -> GSAP-smoothed vectors -> style director (16 formations, morphs
  *            on song/beat changes) -> particle engine + logo stack + camera
  *            -> EffectComposer (afterimage trails + neon bloom).
+ *            In parallel, audioAnalysis.js runs a dedicated beat/BPM/mood
+ *            engine (meyda + realtime-bpm-analyzer) that drives the fast
+ *            kick trigger and tempo-grid classification below.
  * ==========================================================================*/
 
 import * as THREE from 'three';
@@ -16,6 +19,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { gsap } from 'gsap';
 import { FORMATIONS } from './formations.js';
+import { createAudioAnalysis } from './audioAnalysis.js';
 
 /* ---------------------------------------------------------------------------
  * 0. Theme constants (mirrors styles.css)
@@ -443,6 +447,7 @@ let freqData = null;
 let binHz = 0;
 let currentSource = null;
 let running = false;
+let beatEngine = null; // audioAnalysis.js — beat/BPM/mood engine, set once ensureContext() resolves
 
 // Smoothed, normalised audio state (0..1). GSAP eases raw values into these.
 const audio = { bass: 0, mids: 0, highs: 0 };
@@ -455,19 +460,23 @@ let energyRaw = 0; // instantaneous, for song-change detection
 // This is the "is music actually playing?" signal that gates all flashing.
 let musicActivity = 0;
 
-function ensureContext() {
+async function ensureContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;             // -> 256 frequency bins
     // Minimal smoothing so kick TRANSIENTS hit the detector within a frame
     // or two of the drum itself (higher values smear the attack and add
-    // 50ms+ of lag). GSAP smooths the level signals downstream; the
-    // adaptive threshold absorbs the extra frame-to-frame noise.
+    // 50ms+ of lag). GSAP smooths the level signals downstream.
     analyser.smoothingTimeConstant = 0.35;
     freqData = new Uint8Array(analyser.frequencyBinCount);
     // Hz per bin = nyquist / binCount = sampleRate / fftSize (~86 Hz @ 44.1k/512).
     binHz = audioCtx.sampleRate / 2 / analyser.frequencyBinCount;
+    // Beat/BPM/mood engine — separate fftSize-2048 analyser + meyda +
+    // realtime-bpm-analyzer. Async: the BPM analyzer's AudioWorklet has to
+    // load before connectSource() can be called on it.
+    beatEngine = await createAudioAnalysis(audioCtx);
+    wireBeatEngine(beatEngine);
   }
   return audioCtx.resume();
 }
@@ -486,6 +495,7 @@ function connectSource(node) {
   }
   currentSource = node;
   node.connect(analyser);
+  if (beatEngine) beatEngine.connectSource(node);
 }
 
 async function startMic() {
@@ -547,69 +557,41 @@ fileInput.addEventListener('change', (e) => {
 });
 
 /* ---------------------------------------------------------------------------
- * 7. Kick detection — fast-attack envelope on the bass band -> "drop" reaction
+ * 7. Kick detection — driven by audioAnalysis.js's beat/BPM engine.
+ *    beatEngine.onBeat fires on every low-band (20-150Hz) energy spike; we
+ *    classify each one against the engine's BPM as ON- or OFF- the tempo
+ *    grid, and only let on-grid hits fire the big flashes — stray bassline
+ *    hits between beats move the field but never strobe the logo.
  * ------------------------------------------------------------------------- */
-let bassBaseline = 0;
-let bassDev = 0.05; // running deviation -> adaptive beat threshold
-let bassPeak = 0;   // rolling bass peak — "has REAL bass happened recently?"
-let quietFor = 0;   // seconds of near-silence -> drops the tempo lock
-let lastKick = 0;
 const kickState = { pulse: 0 };  // field motion pulse — every detected kick
 const orbState = { pulse: 0 };   // orb/bloom FLASH — tempo-locked beats only
 const colorState = { mix: 0 };   // 0..1, kick colour-flash amount
 
-// Tempo lock: estimate the beat period from kick intervals, and only let
-// detections ON the tempo grid fire the big flashes — stray bassline hits
-// between beats move the field but never strobe the logo.
-const kickIntervals = [];
-let beatPeriod = 0;   // seconds per beat (0 = not locked yet)
-let tempoConf = 0;    // 0..1: how consistent recent intervals are
 let lastStrongBeat = -10;
 let nextBeatAt = 0;   // predicted time of the next beat (predictive flashing)
 let avgKickStrength = 0.6;
 let lastFlashAt = -10;
 
-function classifyKick(t) {
-  const interval = t - lastKick;
-  if (interval > 0.3 && interval < 1.05) { // plausible 57-200 bpm spacing
-    kickIntervals.push(interval);
-    if (kickIntervals.length > 8) kickIntervals.shift();
-    if (kickIntervals.length === 2) {
-      // Fast lock at set start: two agreeing intervals (3 kicks) are enough
-      // for a provisional tempo — the median below keeps refining it.
-      const [a, b] = kickIntervals;
-      if (Math.abs(a - b) < Math.min(a, b) * 0.15) {
-        beatPeriod = (a + b) / 2;
-        tempoConf = 1;
-      }
-    } else if (kickIntervals.length >= 3) {
-      const sorted = [...kickIntervals].sort((a, b) => a - b);
-      beatPeriod = sorted[sorted.length >> 1]; // median
-      let within = 0;
-      for (const iv of kickIntervals) {
-        if (Math.abs(iv - beatPeriod) < beatPeriod * 0.12) within++;
-      }
-      tempoConf = within / kickIntervals.length;
-    }
-  }
-  if (!beatPeriod) return true; // no lock yet -> treat as on-beat
+function classifyOnGrid(t, beatPeriod) {
+  if (!beatPeriod) return true; // no BPM lock yet -> treat as on-beat
   const phase = (t - lastStrongBeat) / beatPeriod;
   const nearest = Math.round(phase);
   return nearest >= 1 && Math.abs(phase - nearest) < 0.18;
 }
 
 /**
- * Predictive flashing: with a confident tempo lock, fire the flash AT the
- * predicted beat time — zero effective latency, and soft kicks the detector
- * misses still flash on the grid. Detections re-anchor the phase. Guards:
- * suspends the moment kicks drop out (breakdown) or energy dies (silence).
+ * Predictive flashing: once beatEngine has a stable BPM lock, fire the flash
+ * AT the predicted beat time — zero effective latency, and soft kicks the
+ * onset detector misses still flash on the grid. Detections re-anchor the
+ * phase. Guards: suspends the moment kicks drop out (breakdown) or energy
+ * dies (silence).
  */
 function updateBeatPredictor(t) {
-  if (!running || !beatPeriod || tempoConf < 0.6 || kickIntervals.length < 2) return;
-  if (t - lastKick > beatPeriod * 4) return;       // beat dropped out
+  if (!running || !beatEngine || !beatEngine.bpm || !beatEngine.bpmStable) return;
+  const beatPeriod = 60 / beatEngine.bpm;
   if (t - lastStrongBeat > beatPeriod * 3) return; // no ON-GRID kicks lately
   if (energyRaw < 0.08) return;                    // near-silence
-  if (bassPeak < 0.28) return; // no real bass recently -> ambience can't strobe
+  if (audio.bass < 0.12) return; // no real bass recently -> ambience can't strobe
   if (nextBeatAt <= 0) nextBeatAt = lastStrongBeat + beatPeriod;
   if (t >= nextBeatAt) {
     if (t - nextBeatAt < 0.08) fireBeat(avgKickStrength * 0.9, t); // on time only
@@ -619,9 +601,8 @@ function updateBeatPredictor(t) {
 let flashColor = ACCENT_B.clone(); // per style: the accent OPPOSITE its centre
 let swirlBoost = 0;
 
-function onKick(strength, onBeat) {
+function onKick(strength, onBeat, beatPeriod) {
   const t = clock.elapsedTime;
-  avgKickStrength += (strength - avgKickStrength) * 0.3;
   // Field motion reacts to every detected kick (musical energy)…
   gsap.to(kickState, {
     keyframes: [
@@ -640,6 +621,15 @@ function onKick(strength, onBeat) {
   fireBeat(strength, t);
 }
 
+/** Hook the beat engine's fast onset event into the show's kick pipeline. */
+function wireBeatEngine(engine) {
+  engine.onBeat((strength, t) => {
+    avgKickStrength += (strength - avgKickStrength) * 0.3;
+    const beatPeriod = engine.bpm ? 60 / engine.bpm : 0;
+    onKick(strength, classifyOnGrid(t, beatPeriod), beatPeriod);
+  });
+}
+
 /** The beat-flash group (orb, bloom, colour, recoil, dolly, style counter).
  *  Reached from BOTH real detections and the predictor; the gap guard makes
  *  sure one beat slot only ever flashes once. */
@@ -648,7 +638,7 @@ function fireBeat(strength, t) {
   // thuds and room ambience are bursty and never reach this duty cycle,
   // so they can trigger nothing here no matter how bass-heavy they are.
   if (musicActivity < 0.65) return;
-  const minGap = beatPeriod ? beatPeriod * 0.45 : 0.2;
+  const minGap = (beatEngine && beatEngine.bpm) ? (60 / beatEngine.bpm) * 0.45 : 0.2;
   if (t - lastFlashAt < minGap) return;
   lastFlashAt = t;
   gsap.to(orbState, {
@@ -675,42 +665,6 @@ function fireBeat(strength, t) {
     z: '-=2.2', duration: 0.08, ease: 'power3.out', yoyo: true, repeat: 1, overwrite: false,
   });
   director.onKick(strength);
-}
-
-/**
- * Adaptive beat detection: a kick is a spike ABOVE the recent baseline, with
- * the threshold scaled to the track's own bass variance — so it keeps firing
- * per-beat during continuously loud passages instead of only on level jumps.
- */
-function detectKick(rawBass, t, dt) {
-  bassBaseline += (rawBass - bassBaseline) * 0.06;
-  const excess = rawBass - bassBaseline;
-  bassDev += (Math.abs(excess) - bassDev) * 0.05;
-  bassPeak = Math.max(bassPeak * (1 - 0.25 * dt), rawBass); // decays 25%/s
-
-  // Sustained near-silence -> the song is over; drop the tempo lock so
-  // ambience can't ride an old grid, and re-lock fresh on the next track.
-  if (energyRaw < 0.05) {
-    quietFor += dt;
-    if (quietFor > 1.5 && beatPeriod) {
-      kickIntervals.length = 0;
-      beatPeriod = 0;
-      tempoConf = 0;
-      nextBeatAt = 0;
-    }
-  } else {
-    quietFor = 0;
-  }
-
-  const threshold = Math.max(0.045, bassDev * 1.35);
-  // A kick must be loud in absolute terms AND stand up to the recent real
-  // bass level — room rumble after the music stops fails both comparisons.
-  if (rawBass > 0.18 && bassPeak > 0.28 && rawBass > bassPeak * 0.55
-      && excess > threshold && t - lastKick > 0.18) {
-    const onBeat = classifyKick(t);
-    lastKick = t;
-    onKick(THREE.MathUtils.clamp(excess / (threshold * 2.2), 0.35, 1), onBeat);
-  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -847,10 +801,25 @@ window.SAMSEN = {
   fx: { afterimage: afterimagePass, bloom: bloomPass, world, logoGroup, kickState, orbState },
   styles: FORMATIONS.map((f) => f.name),
   audio, // exposed for live tuning / test simulation
+  // Independent, composable signals from audioAnalysis.js — wire whichever
+  // ones a new visual needs. onBeat is separate from the show's internal
+  // tempo-grid classifier (see wireBeatEngine): it fires on every raw onset.
+  audioAnalysis: {
+    onBeat: (cb) => (beatEngine ? beatEngine.onBeat(cb) : () => {}),
+    get intensity() { return beatEngine ? beatEngine.intensity : 0; },
+    get rms() { return beatEngine ? beatEngine.rms : 0; },
+    get spectralCentroid() { return beatEngine ? beatEngine.spectralCentroid : 0; },
+    get bpm() { return beatEngine ? beatEngine.bpm : 0; },
+    get bpmStable() { return beatEngine ? beatEngine.bpmStable : false; },
+  },
   debug: () => ({
     active: morph.active, mix: +morph.mix.toFixed(3), ramp: +motion.ramp.toFixed(3),
     idx: director.idx, beats: director.beats,
     t: +clock.elapsedTime.toFixed(1), gsapTime: +gsap.ticker.time.toFixed(1),
+    bpm: beatEngine ? +beatEngine.bpm.toFixed(1) : 0,
+    bpmStable: beatEngine ? beatEngine.bpmStable : false,
+    intensity: beatEngine ? +beatEngine.intensity.toFixed(3) : 0,
+    spectralCentroid: beatEngine ? +beatEngine.spectralCentroid.toFixed(3) : 0,
   }),
 };
 
@@ -893,7 +862,7 @@ function updateAudio(t, dt) {
   setBass(rawBass);
   setMids(rawMids);
   setHighs(rawHighs);
-  detectKick(rawBass, t, dt);
+  if (beatEngine) beatEngine.update(dt, t);
 }
 
 function updateMorph() {
