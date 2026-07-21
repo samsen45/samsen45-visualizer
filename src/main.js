@@ -87,12 +87,15 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 
 const afterimagePass = new AfterimagePass();
-afterimagePass.uniforms['damp'].value = 0.8; // how long light-trails persist
+afterimagePass.uniforms['damp'].value = 0.6; // how long light-trails persist (lowered
+                                              // from 0.8 — every-beat flashing left the
+                                              // trails overlapping into a persistent blur)
 composer.addPass(afterimagePass);
 
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.7,  // strength (base — pulses on kicks)
+  0.55, // strength (base — pulses on kicks; lowered from 0.7 to calm the baseline
+        //          glow now that beats flash continuously)
   0.6,  // radius
   0.22  // threshold (only bright cores bloom -> neon colour survives, no white-out)
 );
@@ -192,6 +195,11 @@ const PARTICLE_SIZE = 0.34;
 // Sparse formations (Double Helix / Geyser / Phoenix) carry an optional
 // `sizeScale`; the applied factor eases toward it through morphs so dots don't
 // pop-resize on a style switch. See formations.js contract.
+// The boost is ramped in by aspect ratio — sparse dots only get lost in the
+// empty sides of a WIDE frame, so full sizeScale applies on wide screens and
+// tapers to 1x on a narrow/portrait window (where big dots would overwhelm).
+const SIZE_ASPECT_NARROW = 1.0; // aspect <= this -> no boost (1x)
+const SIZE_ASPECT_WIDE = 1.6;   // aspect >= this -> full sizeScale (16:9=1.78 already counts)
 let particleSizeScale = 1;
 const particleMat = new THREE.PointsMaterial({
   size: PARTICLE_SIZE,
@@ -665,11 +673,12 @@ function fireBeat(strength, t) {
     overwrite: 'auto',
   });
   gsap.to(bloomPass, {
-    strength: BLOOM_BASE + 0.6 * strength,
+    strength: BLOOM_BASE + 0.3 * strength, // gentler per-flash swell (was 0.6) — every
+                                           // beat flashing made the full boost overbearing
     duration: 0.055, ease: 'power4.out', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   gsap.to(colorState, {
-    mix: 1, duration: 0.07, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
+    mix: 0.6, duration: 0.07, ease: 'power1.inOut', yoyo: true, repeat: 1, overwrite: 'auto',
   });
   // Centre-orb recoil: a quick twist that ALWAYS settles back to dead level
   // (fromTo + yoyo ends at 0 — the logo can never drift off-angle).
@@ -971,8 +980,12 @@ function updateFormation(dt, time) {
   // Kick colour flash toward the style's contrast accent.
   particleMat.color.copy(WHITE).lerp(flashColor, colorState.mix * 0.85);
   // Sparse styles enlarge their dots (eased through the morph) so they read on
-  // a wide screen; dense galaxy styles stay at 1.
-  const targetSizeScale = FORMATIONS[director.idx].sizeScale || 1;
+  // a wide screen; the boost fades out on narrow screens, and dense galaxy
+  // styles stay at 1 regardless.
+  const sizeScale = FORMATIONS[director.idx].sizeScale || 1;
+  const wide = Math.max(0, Math.min(1,
+    (camera.aspect - SIZE_ASPECT_NARROW) / (SIZE_ASPECT_WIDE - SIZE_ASPECT_NARROW)));
+  const targetSizeScale = 1 + (sizeScale - 1) * wide;
   particleSizeScale += (targetSizeScale - particleSizeScale) * Math.min(dt * 3, 1);
   particleMat.size = (PARTICLE_SIZE + bass * 0.1 + pump * 0.24) * particleSizeScale;
 

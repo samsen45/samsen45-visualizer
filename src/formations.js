@@ -80,14 +80,15 @@ export const FORMATIONS = [
 
   /* 3 — two intertwined strands, pink vs green, with connecting rungs */
   {
-    name: 'Double Helix', hue: 'pink', camZ: 52, tiltX: 0, tiltZ: 0.16,
+    name: 'Double Helix', hue: 'pink', camZ: 44, tiltX: 0, tiltZ: 0.16,
     spinAxis: 'y', spinSpeed: 0.8, turbAmp: 0.7, turbFreq: 1, flow: null, eq: false,
     sizeScale: 1.7,
     generate(i, N, o, r1, r2, r3) {
       const s = i % 2;
       const f = i / N;
       const theta = f * Math.PI * 10;
-      const R = 9 + (r2 - 0.5) * 1.5;
+      const R = 15 + (r2 - 0.5) * 2; // wider spiral (was 9) + camZ 52->44 + taller column
+                                     // below, so the helix spreads across / overflows screen
       if (r3 < 0.11) { // rung particle bridging the strands
         const u = r1 * 2 - 1;
         o.x = Math.cos(theta) * R * u;
@@ -99,7 +100,7 @@ export const FORMATIONS = [
         o.z = Math.sin(a) * R;
         o.t = s;
       }
-      o.y = -21 + f * 42 + (r1 - 0.5) * 1.4;
+      o.y = -27 + f * 54 + (r1 - 0.5) * 1.4;
     },
   },
 
@@ -270,31 +271,33 @@ export const FORMATIONS = [
 
   /* 14 — butterfly-curve wings spread behind the logo */
   {
-    name: 'Phoenix Wings', hue: 'pink', camZ: 44, tiltX: 0, tiltZ: 0,
+    name: 'Phoenix Wings', hue: 'pink', camZ: 38, tiltX: 0, tiltZ: 0,
     spinAxis: 'y', spinSpeed: 0.25, turbAmp: 1.1, turbFreq: 1, flow: null, eq: false,
     sizeScale: 1.55,
     generate(i, N, o, r1, r2, r3) {
       const th = r1 * TAU * 2;
       const r = Math.exp(Math.sin(th)) - 2 * Math.cos(4 * th)
         + Math.pow(Math.sin((2 * th - Math.PI) / 24), 5);
-      const s = 4.6;
+      const s = 8.6; // wing-spread scale — big enough that the wings fill the frame
+                     // and overflow the screen edges (was 4.6); camZ pulled in to 38
       o.x = Math.sin(th) * r * s + (r2 - 0.5) * 0.9;
       o.y = (Math.cos(th) * r * s) * 0.92 + (r3 - 0.5) * 0.9;
       o.z = (r2 - 0.5) * 3;
-      o.t = clamp01(Math.abs(o.x) / 14);
+      o.t = clamp01(Math.abs(o.x) / 26); // scaled with s (was /14) so the pink->green
+                                          // wing gradient stays proportional to the bigger span
     },
   },
 
   /* 15 — rising geyser column: pink base erupting to green spray */
   {
-    name: 'Geyser', hue: 'pink', camZ: 50, tiltX: 0, tiltZ: 0,
+    name: 'Geyser', hue: 'pink', camZ: 42, tiltX: 0, tiltZ: 0,
     spinAxis: 'y', spinSpeed: 0.6, turbAmp: 1.2, turbFreq: 1.1,
     flow: { speed: 12, min: -14, max: 16 }, eq: false, sizeScale: 1.6,
     generate(i, N, o, r1, r2, r3) {
       const f = r1;
-      const R = 1.2 + Math.pow(f, 2.2) * 14 + (r2 - 0.5) * 2;
-      const a = r3 * TAU;
-      o.x = Math.cos(a) * R;
+      const R = 1.2 + Math.pow(f, 2.2) * 20 + (r2 - 0.5) * 2; // wider spray (was 14) +
+      const a = r3 * TAU;                                     // camZ 50->42 so it spreads
+      o.x = Math.cos(a) * R;                                  // larger across the screen
       o.y = -14 + f * 30;
       o.z = Math.sin(a) * R;
       o.t = clamp01(f);
