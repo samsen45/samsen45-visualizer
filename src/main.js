@@ -45,6 +45,8 @@ const WORD_LIST = [
   'REBOOT', 'REUNITE', 'RESTART', 'REVOLUTION',
   'REBIRTH', 'RESONATE', 'REWIRE', 'RENEW',
   'RECYCLE', 'AWAKEN', 'PULSE', 'INFINITE', 'DJ MELLOW',
+  'REUNION', 'REPLAY', 'REMEMBER', 'RECONNECT',
+  'COLLECT THE DOTS', 'RECHARGE', 'SAMSEN45 FOREVER',
 ];
 
 /* ---------------------------------------------------------------------------
